@@ -20,6 +20,7 @@ windows/
 - 搜狗或 Google 每完成一路，就发布新的响应 revision。
 - helper 仅在前台窗口仍相同时注入私有 `F24`；Lua 吞掉该事件并刷新候选。
 - 用户上屏后，Lua 显式调用 `Memory:update_userdict`。
+- 与本地词典、用户词或大模型候选同文时，保留非云版本；首轮双源完成后自动扩大候选池补查一次。
 
 完整时序见 [`../../docs/architecture.md`](../../docs/architecture.md)。
 
@@ -88,9 +89,15 @@ patch:
     insert_after: 2
     min_input_length: 2
     learn_to_user_dict: true
+    refill_on_duplicate: true
+    refill_delay_ms: 100
+    refill_candidates_per_source: 10
+    refill_max_candidates: 20
 ```
 
 cloud filter 应位于方案原有的 `uniquifier` 之后。`insert_after: 2` 先输出两个本地候选，因此云候选从第 3 位开始；`max_candidates: 5` 是两个来源去重合并后的总上限。
+
+如果某个云候选已由本地词典、用户词库或大模型给出，filter 会保留非云版本并过滤带 `☁` 的版本。首轮搜狗和 Google 都结束后，只要发生过这种过滤，就用更大的候选池补查一次，尽量把 5 个云候选补满；扩大后仍不足时不再请求。
 
 修改后重新部署小狼毫，并在 `build/rime_frost.schema.yaml` 中确认三个组件和参数已经生效。
 
@@ -118,6 +125,10 @@ patch:
 | `insert_after` | `3` | 仅挂载 filter 时，先输出多少个本地候选 |
 | `min_input_length` | `2` | 触发查询的最短输入长度 |
 | `learn_to_user_dict` | `true` | 云候选上屏后是否写入当前方案用户词库 |
+| `refill_on_duplicate` | `true` | 过滤本地/大模型重复项后是否补查一次 |
+| `refill_delay_ms` | `100` | 补查防抖时间 |
+| `refill_candidates_per_source` | `10` | 补查时每个来源最多解析多少候选 |
+| `refill_max_candidates` | `20` | 补查合并池上限，最终显示仍受 `max_candidates` 限制 |
 
 ## 进程生命周期
 
@@ -152,6 +163,7 @@ cloud_pinyin_async.log
 4. 在网络请求期间继续输入，确认没有按键卡顿。
 5. 快速修改输入，确认旧拼音结果不会进入新菜单。
 6. 选中云候选后重复输入，确认用户词库已经记忆。
+7. 用本地或大模型已经能给出的词测试，确认只显示非云版本；日志出现一次 `duplicate refill requested`，随后最多仍显示 5 个纯云新增候选。
 
 ## 故障排查
 

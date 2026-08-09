@@ -29,7 +29,9 @@
 5. 第一个来源完成后，helper 再次读取当前请求编号。仍有效才写 revision 1，并通过平台刷新通道通知前端。
 6. Lua 收到通知后核对请求编号、输入、候选菜单和选择位置，全部一致才刷新未确认组句。
 7. 第二个来源完成后，helper 去重合并并发布 revision 2；若内容没有变化则不重复刷新。
-8. 用户选择云候选后，Lua 通过实际上屏文本确认选择，并显式写入当前方案用户词库。
+8. `uniquifier` 后的 cloud filter 检查 genuine candidates。若同文候选同时包含云端和本地词典、用户词或大模型版本，只保留非云版本。
+9. 首轮双源均结束且过滤重复项造成云候选缺口时，Lua 只补查一次：使用新请求编号、较短防抖和更大的候选池；最终显示仍由 `max_candidates` 截断。
+10. 用户选择云候选后，Lua 通过实际上屏文本确认选择，并显式写入当前方案用户词库；被抑制的本地/大模型候选不走云词显式学习路径。
 
 旧 HTTP 任务不直接修改候选菜单。任何响应只有通过“请求编号仍相同”和“当前 Rime context 仍匹配”两层检查后才可见。
 
@@ -44,6 +46,10 @@
 | `insert_after` | Lua filter | 先输出多少个本地候选 |
 | `min_input_length` | Lua processor | 触发云查询的最短输入长度 |
 | `learn_to_user_dict` | Lua processor | 上屏后是否写入用户词库 |
+| `refill_on_duplicate` | Lua filter | 过滤本地/大模型重复项后是否发起一次补查 |
+| `refill_delay_ms` | helper | 补查防抖时间 |
+| `refill_candidates_per_source` | helper | 补查时每个 provider 的候选池上限 |
+| `refill_max_candidates` | helper | 补查时双源合并池上限，不是最终显示数量 |
 
 ## 平台责任
 
@@ -57,6 +63,14 @@
 - 对“输入期间无卡顿”和“过期响应不显示”的实测证据。
 
 provider URL、请求解析和合并规则在不同语言实现中应保持行为一致，但不要求源码结构完全相同。
+
+## 重复过滤与补查
+
+cloud filter 位于 `uniquifier` 之后。`uniquifier` 将同文本的 genuine candidates 保存在同一个包装候选中，filter 因而可以区分“纯云候选”和“同时存在非云版本的候选”。后者优先级为用户词版本优先，其次为第一个非云 genuine candidate；云版本被标记为 suppressed，不参与显式云词学习。
+
+补查不是无限重试：只允许从普通首轮请求进入一次带 `-refill-` 标记的新请求。默认把每源解析量从 5 扩大到 10、双源合并池扩大到 20，然后由 filter 删除本地/大模型重复项并只输出 `max_candidates` 个云候选。若扩大后仍不足，不再联网。
+
+首轮某一 provider 仍为 `pending` 时不补查，避免第二来源本可自然补足却产生额外网络请求。一次完整输入最多产生两轮、每轮两个并发 HTTP 请求。
 
 ## Windows 当前生命周期
 

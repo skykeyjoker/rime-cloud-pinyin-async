@@ -13,6 +13,10 @@ patch:
     insert_after: 2
     min_input_length: 2
     learn_to_user_dict: true
+    refill_on_duplicate: true
+    refill_delay_ms: 100
+    refill_candidates_per_source: 10
+    refill_max_candidates: 20
 
 # 如需让云候选从第 1 位开始，删除 engine/filters 这一行；此时
 # insert_after 不参与排序，云候选会按 translator 的高权重进入菜单前部。

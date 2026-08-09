@@ -9,6 +9,8 @@ local M = {}
 
 local REQUEST_PROPERTY = "cloud_pinyin_async_request"
 local READY_PROPERTY = "cloud_pinyin_async_ready"
+local REFILL_PROPERTY = "cloud_pinyin_async_refill"
+local REFILL_MARKER = "-refill-"
 local REQUEST_FILE = "cloud_pinyin_async.request"
 local RESPONSE_FILE = "cloud_pinyin_async.response"
 local HEARTBEAT_FILE = "cloud_pinyin_async.heartbeat"
@@ -205,6 +207,10 @@ local function load_config(env)
         insert_after = config_number(config, "insert_after", 3),
         min_input_length = config_number(config, "min_input_length", 2),
         learn_to_user_dict = config:get_bool("cloud_pinyin_async/learn_to_user_dict") ~= false,
+        refill_on_duplicate = config:get_bool("cloud_pinyin_async/refill_on_duplicate") ~= false,
+        refill_delay_ms = config_number(config, "refill_delay_ms", 100),
+        refill_candidates_per_source = config_number(config, "refill_candidates_per_source", 10),
+        refill_max_candidates = config_number(config, "refill_max_candidates", 20),
     }
 end
 
@@ -238,8 +244,9 @@ local function ensure_helper()
     return true
 end
 
-local function write_request(request_id, context_input, query_input, config)
+local function write_request(request_id, context_input, query_input, config, overrides)
     ensure_helper()
+    overrides = overrides or {}
     local file = io.open(path(REQUEST_FILE), "wb")
     if not file then
         log.error("[cloud_pinyin_async] cannot write request file")
@@ -249,10 +256,10 @@ local function write_request(request_id, context_input, query_input, config)
         request_id, "\t",
         context_input, "\t",
         query_input, "\t",
-        tostring(config.delay_ms), "\t",
+        tostring(overrides.delay_ms or config.delay_ms), "\t",
         tostring(config.timeout_ms), "\t",
-        tostring(config.candidates_per_source), "\t",
-        tostring(config.max_candidates), "\n")
+        tostring(overrides.candidates_per_source or config.candidates_per_source), "\t",
+        tostring(overrides.max_candidates or config.max_candidates), "\n")
     file:close()
     return true
 end
@@ -307,6 +314,7 @@ local function schedule_context(context, env)
     local request_id = env.nonce .. "-" .. tostring(env.sequence)
     context:set_property(REQUEST_PROPERTY, request_id)
     context:set_property(READY_PROPERTY, "")
+    context:set_property(REFILL_PROPERTY, "")
 
     if is_full_pinyin_context(context, env.cloud_config) then
         local query = input:gsub("'", "")
@@ -402,24 +410,97 @@ local function genuine_candidate(candidate)
     return candidate
 end
 
-local function user_phrase_variant(candidate)
+local function preferred_local_variant(candidate)
+    local preferred = nil
+    local fallback = nil
+    local contains_cloud = false
     local ok, variants = pcall(function()
         return candidate:get_genuines()
     end)
     if ok and variants then
         for _, variant in ipairs(variants) do
             local genuine = genuine_candidate(variant)
-            if variant.type == "user_phrase" or genuine.type == "user_phrase" then
-                return variant
+            if genuine.type == "cloud_pinyin_async" then
+                contains_cloud = true
+            elseif variant.type == "user_phrase" or genuine.type == "user_phrase" then
+                preferred = preferred or variant
+            else
+                fallback = fallback or variant
             end
         end
     end
 
     local genuine = genuine_candidate(candidate)
-    if candidate.type == "user_phrase" or genuine.type == "user_phrase" then
-        return candidate
+    if genuine.type == "cloud_pinyin_async" then
+        contains_cloud = true
+    elseif candidate.type == "user_phrase" or genuine.type == "user_phrase" then
+        preferred = preferred or candidate
+    else
+        fallback = fallback or candidate
     end
-    return nil
+    return preferred or fallback, contains_cloud
+end
+
+local function response_suppresses_text(response, text)
+    return response and
+        response.suppressed_texts and
+        response.suppressed_texts[text] == true
+end
+
+local function providers_finished(response)
+    return response and
+        response.sogou_status ~= "pending" and
+        response.google_status ~= "pending"
+end
+
+local function request_duplicate_refill(context, response, config)
+    if not config.refill_on_duplicate or
+        not providers_finished(response) or
+        response.id:find(REFILL_MARKER, 1, true) or
+        response.id ~= context:get_property(REQUEST_PROPERTY) or
+        response.input ~= context.input then
+        return false
+    end
+
+    local refill_token = response_token(response)
+    if context:get_property(REFILL_PROPERTY) == refill_token then
+        return false
+    end
+
+    local candidates_per_source = math.min(
+        10,
+        math.max(config.candidates_per_source + 1, config.refill_candidates_per_source))
+    local max_candidates = math.min(
+        20,
+        math.max(config.max_candidates + 1, config.refill_max_candidates))
+    if candidates_per_source <= config.candidates_per_source and
+        max_candidates <= config.max_candidates then
+        return false
+    end
+
+    local request_id = response.id .. REFILL_MARKER .. tostring(response.revision)
+    local written = write_request(
+        request_id,
+        response.input,
+        response.query,
+        config,
+        {
+            delay_ms = config.refill_delay_ms,
+            candidates_per_source = candidates_per_source,
+            max_candidates = max_candidates,
+        })
+    if not written then
+        return false
+    end
+
+    context:set_property(REFILL_PROPERTY, refill_token)
+    context:set_property(REQUEST_PROPERTY, request_id)
+    context:set_property(READY_PROPERTY, "")
+    log.info(
+        "[cloud_pinyin_async] duplicate refill requested: per_source=" ..
+        tostring(candidates_per_source) ..
+        " pool=" .. tostring(max_candidates))
+    return true
 end
 
 local function remember_cloud_code(text, code, token, input)
@@ -463,7 +544,8 @@ local function learn_pending(context, env)
     -- without depending on the wrapped candidate type.
     if activated_response then
         for _, candidate in ipairs(activated_response.candidates or {}) do
-            if commit_text:find(candidate.text, 1, true) then
+            if not response_suppresses_text(activated_response, candidate.text) and
+                commit_text:find(candidate.text, 1, true) then
                 local remembered = recent_cloud_codes[candidate.text]
                 local code = activated_response.learn_codes and activated_response.learn_codes[candidate.text] or nil
                 code = code or (remembered and remembered.code or nil)
@@ -548,6 +630,12 @@ local function processor_init(env)
                     break
                 end
             end
+        end
+
+        if response_suppresses_text(response, candidate_text) and
+            genuine.type ~= "cloud_pinyin_async" and
+            not marked_cloud then
+            return
         end
 
         if genuine.type ~= "cloud_pinyin_async" and not marked_cloud and not response_item then
@@ -707,16 +795,26 @@ end
 
 local function filter_func(input, env)
     local context = env.engine.context
-    if not active_response(context) then
+    local response = active_response(context)
+    if not response then
         for candidate in input:iter() do
             yield(candidate)
         end
         return
     end
 
+    response.suppressed_texts = response.suppressed_texts or {}
     local cloud_candidates = {}
     local local_count = 0
+    local cloud_count = 0
     local inserted = false
+    local refill_requested = false
+    local seen_text = {}
+
+    local function candidate_text(candidate)
+        local genuine = genuine_candidate(candidate)
+        return candidate.text or genuine.text or ""
+    end
 
     local function emit_cloud()
         if inserted then
@@ -724,29 +822,69 @@ local function filter_func(input, env)
         end
         inserted = true
         for _, candidate in ipairs(cloud_candidates) do
-            yield(candidate)
+            if cloud_count >= env.cloud_config.max_candidates then
+                break
+            end
+            local text = candidate_text(candidate)
+            if text == "" or not seen_text[text] then
+                yield(candidate)
+                if text ~= "" then
+                    seen_text[text] = true
+                end
+                cloud_count = cloud_count + 1
+            end
         end
     end
 
     for candidate in input:iter() do
-        -- `uniquifier` may combine a high-quality cloud candidate with an
-        -- existing learned user phrase. Prefer the user-phrase member so the
-        -- normal Rime ranking/learning path takes over on subsequent input.
-        local learned_variant = user_phrase_variant(candidate)
-        local genuine = genuine_candidate(candidate)
-        if learned_variant then
-            yield(learned_variant)
-            local_count = local_count + 1
-            if local_count >= env.cloud_config.insert_after then
-                emit_cloud()
+        -- `uniquifier` retains every genuine candidate. If a cloud candidate
+        -- has the same text as a local dictionary/user phrase/model result,
+        -- keep the non-cloud variant and use a larger one-shot cloud request
+        -- to refill the resulting display gap.
+        local local_variant, contains_cloud = preferred_local_variant(candidate)
+        if contains_cloud and local_variant then
+            local text = candidate_text(local_variant)
+            if text ~= "" then
+                response.suppressed_texts[text] = true
             end
-        elseif genuine.type == "cloud_pinyin_async" then
-            cloud_candidates[#cloud_candidates + 1] = candidate
+            if not refill_requested then
+                refill_requested = request_duplicate_refill(context, response, env.cloud_config)
+            end
+            if text == "" or not seen_text[text] then
+                yield(local_variant)
+                if text ~= "" then
+                    seen_text[text] = true
+                end
+                local_count = local_count + 1
+                if local_count >= env.cloud_config.insert_after then
+                    emit_cloud()
+                end
+            end
+        elseif contains_cloud then
+            if inserted then
+                local text = candidate_text(candidate)
+                if cloud_count < env.cloud_config.max_candidates and
+                    (text == "" or not seen_text[text]) then
+                    yield(candidate)
+                    if text ~= "" then
+                        seen_text[text] = true
+                    end
+                    cloud_count = cloud_count + 1
+                end
+            else
+                cloud_candidates[#cloud_candidates + 1] = candidate
+            end
         else
-            yield(candidate)
-            local_count = local_count + 1
-            if local_count >= env.cloud_config.insert_after then
-                emit_cloud()
+            local text = candidate_text(candidate)
+            if text == "" or not seen_text[text] then
+                yield(candidate)
+                if text ~= "" then
+                    seen_text[text] = true
+                end
+                local_count = local_count + 1
+                if local_count >= env.cloud_config.insert_after then
+                    emit_cloud()
+                end
             end
         end
     end

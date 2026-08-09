@@ -50,6 +50,12 @@ Windows 当前实现对数值执行防御性约束：
 - `candidates_per_source`: 1–10
 - `max_candidates`: 1–20
 
+### 补查仍使用 V1 请求
+
+过滤器发现云候选与本地词典、用户词或大模型候选同文后，不需要新增协议字段。首轮双源都完成时，Lua 使用新的 `request_id` 再写一条 V1 请求，并提高 `candidates_per_source` 与 `max_candidates`。Windows 默认补查值为每源 10、合并池 20，防抖 100 ms。
+
+补查请求编号包含 `-refill-`，同一输入最多补查一次。这里的较大 `max_candidates` 只控制 helper 返回池；Lua filter 仍按方案配置的显示上限截断。
+
 ## 响应文件
 
 第一行为九字段 header：

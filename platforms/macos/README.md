@@ -26,6 +26,7 @@ macos/
 - [`../../docs/file-protocol-v1.md`](../../docs/file-protocol-v1.md) 定义的请求、响应、revision、心跳和来源代码。
 - 两个 provider 并发、先到先发布、第二来源合并的行为。
 - `delay_ms`、`timeout_ms`、`candidates_per_source`、`max_candidates` 等配置语义。
+- 本地/大模型同文候选优先，以及只执行一轮扩大候选池补查的语义。
 - `☁搜`、`☁谷`、`☁搜谷` 标记。
 - 上屏后由 Lua 调用 `Memory:update_userdict` 的学习模型。
 
@@ -74,6 +75,7 @@ Windows Lua 写死了 `.exe` 文件名与 `cmd.exe /c start`。Mac 版本应替�
 - [ ] 快速继续输入时，旧结果永不进入新菜单。
 - [ ] 切换前台应用时不注入刷新或候选。
 - [ ] 云候选数量与插入位置遵守同一配置语义。
+- [ ] 云候选与本地/大模型同文时保留非云版本，并且补查最多一轮。
 - [ ] Space、数字键和鼠标上屏均能写入用户词库。
 - [ ] helper 崩溃、断网和 provider 超时不影响本地候选。
 - [ ] 日志不包含完整查询内容和候选正文。

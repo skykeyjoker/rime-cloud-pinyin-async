@@ -1,0 +1,18 @@
+# 白霜拼音示例：先保留 2 个本地候选，云候选从第 3 位开始，最多显示 5 个。
+patch:
+  "engine/processors/@before 0": lua_processor@*cloud_pinyin_async*processor
+  "engine/translators/@before last": lua_translator@*cloud_pinyin_async*translator
+  # 放在方案原有的 uniquifier 之后。
+  "engine/filters/@next": lua_filter@*cloud_pinyin_async*filter
+
+  cloud_pinyin_async:
+    delay_ms: 500
+    timeout_ms: 1200
+    candidates_per_source: 5
+    max_candidates: 5
+    insert_after: 2
+    min_input_length: 2
+    learn_to_user_dict: true
+
+# 如需让云候选从第 1 位开始，删除 engine/filters 这一行；此时
+# insert_after 不参与排序，云候选会按 translator 的高权重进入菜单前部。

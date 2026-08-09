@@ -1,8 +1,9 @@
 # Build output
-cloud_pinyin_async_helper.exe
+*.exe
 *.pdb
-bin/
-obj/
+**/bin/
+**/obj/
+**/dist/
 
 # Runtime state written in the Rime user directory
 cloud_pinyin_async.request
@@ -10,6 +11,7 @@ cloud_pinyin_async.response
 cloud_pinyin_async.heartbeat
 cloud_pinyin_async.log
 test-state/
+**/test-state/
 
 # Editors and operating systems
 .DS_Store

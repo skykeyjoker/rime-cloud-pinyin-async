@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$OutputPath = (Join-Path $PSScriptRoot 'cloud_pinyin_async_helper.exe')
+    [string]$OutputPath = (Join-Path $PSScriptRoot 'dist\cloud_pinyin_async_helper.exe')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,7 +18,7 @@ if (-not $compiler) {
     throw 'Cannot find the .NET Framework C# compiler (csc.exe). Enable .NET Framework 4.x.'
 }
 
-$source = Join-Path $PSScriptRoot 'CloudPinyinAsyncHelper.cs'
+$source = Join-Path $PSScriptRoot 'src\CloudPinyinAsyncHelper.cs'
 $output = [IO.Path]::GetFullPath($OutputPath)
 $outputDirectory = Split-Path -Parent $output
 if (-not (Test-Path -LiteralPath $outputDirectory)) {

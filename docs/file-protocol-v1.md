@@ -34,14 +34,16 @@ request_id<TAB>context_input<TAB>query_input<TAB>delay_ms<TAB>timeout_ms<TAB>can
 | 序号 | 字段 | 说明 |
 |---:|---|---|
 | 1 | `request_id` | 当前 Rime engine/session 内唯一且单调变化的请求标识 |
-| 2 | `context_input` | Rime context 中的原始全拼输入，可含撇号 |
-| 3 | `query_input` | 发送 provider 的输入，当前实现去掉撇号 |
+| 2 | `context_input` | Rime context 中的完整原始全拼输入，可含撇号；分段选词后仍保持完整，用于拒绝过期响应 |
+| 3 | `query_input` | 当前尚未确认的 `abc` segment，发送 provider 前去掉撇号 |
 | 4 | `delay_ms` | 防抖时间 |
 | 5 | `timeout_ms` | 单 provider 超时 |
 | 6 | `candidates_per_source` | 单来源候选上限 |
 | 7 | `max_candidates` | 双源去重后的总上限 |
 
 空的 `query_input` 表示当前 context 已不适合显示云候选。helper 应清空响应并取消 pending 状态；已经发出的网络任务可以继续结束，但不得再发布该请求。
+
+分段选词时，Rime 会推进当前 segment，但不一定改变 `context_input` 或触发普通输入更新。Lua 因此同时使用完整输入、segment 范围和 `query_input` 标识请求，并在候选确认后主动调度剩余 segment；响应必须同时匹配请求编号、完整输入和剩余查询才可显示。
 
 Windows 与 macOS 共享 helper 都对数值执行以下防御性约束：
 

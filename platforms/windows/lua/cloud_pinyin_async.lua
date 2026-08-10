@@ -272,16 +272,57 @@ local function current_segment(context)
     return composition:back()
 end
 
-local function is_full_pinyin_context(context, config)
-    local input = context.input or ""
-    if #input < config.min_input_length or not input:match("^[a-z']+$") then
-        return false
-    end
+local function current_request_target(context, config)
+    local context_input = context.input or ""
     if not context:has_menu() then
-        return false
+        return nil
     end
+
     local segment = current_segment(context)
-    return segment and segment.tags and segment.tags["abc"]
+    if not segment or not segment.tags or not segment.tags["abc"] then
+        return nil
+    end
+
+    -- Confirming a candidate advances the active segment but deliberately
+    -- keeps Context.input unchanged. Query only that unconfirmed suffix while
+    -- retaining the full input as the stale-response guard.
+    local segment_input = context_input:sub(segment.start + 1, segment._end)
+    if #segment_input < config.min_input_length or
+        not segment_input:match("^[a-z']+$") then
+        return nil
+    end
+
+    local query_input = segment_input:gsub("'", "")
+    local target_key = table.concat({
+        context_input,
+        tostring(segment.start),
+        tostring(segment._end),
+        query_input,
+    }, "\31")
+    return {
+        context_input = context_input,
+        segment_input = segment_input,
+        query_input = query_input,
+        start = segment.start,
+        finish = segment._end,
+        key = target_key,
+        signature = target_key .. "\31" .. tostring(context.caret_pos),
+    }
+end
+
+local function response_matches_target(context, response, config)
+    if not response or
+        response.id ~= context:get_property(REQUEST_PROPERTY) then
+        return nil
+    end
+
+    local target = current_request_target(context, config)
+    if not target or
+        response.input ~= target.context_input or
+        response.query ~= target.query_input then
+        return nil
+    end
+    return target
 end
 
 local function make_nonce(env)
@@ -291,18 +332,21 @@ end
 
 local function schedule_context(context, env)
     local input = context.input or ""
-    local signature = input .. "\31" .. tostring(context.caret_pos)
+    local target = current_request_target(context, env.cloud_config)
+    local signature = target and target.signature or
+        table.concat({ input, tostring(context.caret_pos), "inactive" }, "\31")
 
     -- Rebuilding the menu after a cloud response can itself emit update
     -- notifications (and may change caret metadata). Keep the accepted request
     -- stable until the user actually changes the input, so a second provider
     -- can merge into the same candidate menu instead of becoming stale.
-    if env.active_cloud_input then
-        if input == env.active_cloud_input and context:get_property(READY_PROPERTY) ~= "" then
+    if env.active_cloud_target then
+        if target and target.key == env.active_cloud_target and
+            context:get_property(READY_PROPERTY) ~= "" then
             env.last_signature = signature
             return
         end
-        env.active_cloud_input = nil
+        env.active_cloud_target = nil
     end
 
     if signature == env.last_signature then
@@ -316,9 +360,12 @@ local function schedule_context(context, env)
     context:set_property(READY_PROPERTY, "")
     context:set_property(REFILL_PROPERTY, "")
 
-    if is_full_pinyin_context(context, env.cloud_config) then
-        local query = input:gsub("'", "")
-        write_request(request_id, input, query, env.cloud_config)
+    if target then
+        write_request(
+            request_id,
+            target.context_input,
+            target.query_input,
+            env.cloud_config)
     else
         write_request(request_id, "", "", env.cloud_config)
         if input == "" then
@@ -457,8 +504,7 @@ local function request_duplicate_refill(context, response, config)
     if not config.refill_on_duplicate or
         not providers_finished(response) or
         response.id:find(REFILL_MARKER, 1, true) or
-        response.id ~= context:get_property(REQUEST_PROPERTY) or
-        response.input ~= context.input then
+        not response_matches_target(context, response, config) then
         return false
     end
 
@@ -589,13 +635,64 @@ local function learn_pending(context, env)
     end
 end
 
+local function capture_cloud_selection(current, env)
+    local candidate = current:get_selected_candidate()
+    if not candidate then
+        return
+    end
+
+    local genuine = genuine_candidate(candidate)
+    local candidate_text = candidate.text or genuine.text or ""
+    local marked_cloud = (candidate.comment or ""):find("☁", 1, true) ~= nil
+    local response = active_response(current)
+    local response_item = nil
+    if response then
+        for _, item in ipairs(response.candidates) do
+            if item.text == candidate_text then
+                response_item = item
+                break
+            end
+        end
+    end
+
+    if response_suppresses_text(response, candidate_text) and
+        genuine.type ~= "cloud_pinyin_async" and
+        not marked_cloud then
+        return
+    end
+
+    if genuine.type ~= "cloud_pinyin_async" and not marked_cloud and not response_item then
+        return
+    end
+
+    local remembered = recent_cloud_codes[candidate_text]
+    local code = remembered and remembered.code or nil
+    if not code and response and response.learn_codes then
+        code = response.learn_codes[candidate_text]
+    end
+    if not code and response_item then
+        code = normalize_code(response_item.pinyin)
+    end
+    code = code or normalize_code(genuine.preedit or candidate.preedit or "")
+    if not code then
+        log.error("[cloud_pinyin_async] selected cloud candidate has no learnable code")
+        return
+    end
+
+    env.pending_cloud[#env.pending_cloud + 1] = {
+        text = candidate_text,
+        code = code,
+    }
+    log.info("[cloud_pinyin_async] captured cloud selection")
+end
+
 local function processor_init(env)
     env.cloud_config = load_config(env)
     env.last_signature = nil
     env.sequence = 0
     env.nonce = make_nonce(env)
     env.pending_cloud = {}
-    env.active_cloud_input = nil
+    env.active_cloud_target = nil
     env.last_activated_response = nil
 
     local ok, memory = pcall(function()
@@ -613,54 +710,11 @@ local function processor_init(env)
         schedule_context(current, env)
     end)
     env.select_connection = context.select_notifier:connect(function(current)
-        local candidate = current:get_selected_candidate()
-        if not candidate then
-            return
-        end
-
-        local genuine = genuine_candidate(candidate)
-        local candidate_text = candidate.text or genuine.text or ""
-        local marked_cloud = (candidate.comment or ""):find("☁", 1, true) ~= nil
-        local response = active_response(current)
-        local response_item = nil
-        if response then
-            for _, item in ipairs(response.candidates) do
-                if item.text == candidate_text then
-                    response_item = item
-                    break
-                end
-            end
-        end
-
-        if response_suppresses_text(response, candidate_text) and
-            genuine.type ~= "cloud_pinyin_async" and
-            not marked_cloud then
-            return
-        end
-
-        if genuine.type ~= "cloud_pinyin_async" and not marked_cloud and not response_item then
-            return
-        end
-
-        local remembered = recent_cloud_codes[candidate_text]
-        local code = remembered and remembered.code or nil
-        if not code and response and response.learn_codes then
-            code = response.learn_codes[candidate_text]
-        end
-        if not code and response_item then
-            code = normalize_code(response_item.pinyin)
-        end
-        code = code or normalize_code(genuine.preedit or candidate.preedit or "")
-        if not code then
-            log.error("[cloud_pinyin_async] selected cloud candidate has no learnable code")
-            return
-        end
-
-        env.pending_cloud[#env.pending_cloud + 1] = {
-            text = candidate_text,
-            code = code,
-        }
-        log.info("[cloud_pinyin_async] captured cloud selection")
+        capture_cloud_selection(current, env)
+        -- Partial selection does not necessarily emit update_notifier. The
+        -- select callback runs after Rime advances composition, so explicitly
+        -- schedule the newly active suffix here.
+        schedule_context(current, env)
     end)
     env.commit_connection = context.commit_notifier:connect(function(current)
         learn_pending(current, env)
@@ -696,7 +750,8 @@ local function processor_func(key, env)
 
     local context = env.engine.context
     local response = read_current_response()
-    if not response or response.id ~= context:get_property(REQUEST_PROPERTY) or response.input ~= context.input then
+    local target = response_matches_target(context, response, env.cloud_config)
+    if not target then
         log.info("[cloud_pinyin_async] refresh ignored: stale response")
         return 1
     end
@@ -711,7 +766,7 @@ local function processor_func(key, env)
         return 1
     end
 
-    env.active_cloud_input = context.input
+    env.active_cloud_target = target.key
     env.last_activated_response = response
     context:set_property(READY_PROPERTY, response_token(response))
     log.info("[cloud_pinyin_async] activating response " .. response_token(response))
@@ -741,7 +796,11 @@ end
 local function translator_func(input, segment, env)
     local context = env.engine.context
     local response = active_response(context)
-    if not response or response.input ~= input or response.id ~= context:get_property(REQUEST_PROPERTY) then
+    local query_input = (input or ""):gsub("'", "")
+    if not response or
+        response.id ~= context:get_property(REQUEST_PROPERTY) or
+        response.input ~= (context.input or "") or
+        response.query ~= query_input then
         return
     end
 
@@ -796,7 +855,7 @@ end
 local function filter_func(input, env)
     local context = env.engine.context
     local response = active_response(context)
-    if not response then
+    if not response_matches_target(context, response, env.cloud_config) then
         for candidate in input:iter() do
             yield(candidate)
         end
@@ -894,6 +953,11 @@ end
 M.filter = {
     init = filter_init,
     func = filter_func,
+}
+
+M._test = {
+    current_request_target = current_request_target,
+    response_matches_target = response_matches_target,
 }
 
 return M

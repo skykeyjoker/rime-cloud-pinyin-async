@@ -1,9 +1,10 @@
--- Asynchronous cloud pinyin for Fcitx5 on macOS.
+-- Asynchronous cloud pinyin shared by macOS Rime frontends.
 --
--- Network requests run in cloud_pinyin_async_helper, outside the Fcitx5 core.
+-- Network requests run in cloud_pinyin_async_helper, outside the Rime frontend.
 -- Lua only exchanges small state files and rebuilds the candidate menu after a
--- private F24 event delivered inside Fcitx5 by cloudpinyinrefresh. Selected
--- cloud candidates are explicitly written to the active schema's user dictionary.
+-- private F24 event delivered directly to the active Rime engine by the
+-- frontend-specific refresh bridge. Selected cloud candidates are explicitly
+-- written to the active schema's user dictionary.
 
 local M = {}
 

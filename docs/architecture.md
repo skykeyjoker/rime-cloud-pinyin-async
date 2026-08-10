@@ -78,11 +78,21 @@ Windows helper 在方案初始化时按需启动，通过 session-local mutex �
 
 Lua 将 6 秒内更新过的心跳视为存活；心跳过期后，在下一次方案初始化或请求写入时尝试重新拉起，并有 5 秒重复启动节流。该行为将在后续版本评估为“按需启动 + 空闲退出 + 文件变更通知”，但改变前应先补充回归测试。
 
-## Fcitx5-Mac 当前生命周期
+## macOS 共享 helper 生命周期
 
-Swift helper 由 Lua 在方案初始化或写请求时按需启动，通过 Rime 用户目录中的 `flock` 锁保证单实例。它每 20 ms 检查请求文件、每 2 秒写一次心跳；Lua 同样采用 6 秒存活窗口和 5 秒重复启动节流。helper 当前没有空闲退出，Fcitx5 重启后原 helper 可以继续复用。
+Swift helper 由 Lua 在方案初始化或写请求时按需启动，通过 Rime 用户目录中的 `flock` 锁保证单实例。它每 20 ms 检查请求文件、每 2 秒写一次心跳；Lua 同样采用 6 秒存活窗口和 5 秒重复启动节流。helper 当前没有空闲退出，前端重启后原 helper 可以继续复用。
+
+每次成功写入新 revision 后，helper 都会发布目录限定的鼠须管刷新通知。Fcitx5 不监听该通知，仍使用自己的进程内 addon，因此两个前端可以共享 helper 源码而不共享 Rime 运行目录或 session。
+
+## Fcitx5-Mac 刷新生命周期
 
 刷新 addon 运行在 Fcitx5 进程内，每 25 ms 比较响应文件快照。只有当前输入上下文有焦点且正在使用 `rime` 时，它才向该引擎直接投递私有 `F24`；没有焦点、已经切换方案或响应为空时安全忽略。addon 不执行网络请求，也不把按键发送给前台 macOS 应用。
+
+## 鼠须管刷新生命周期
+
+鼠须管应用代理使用 `deliverImmediately` 监听 `SquirrelCloudPinyinResponseReadyNotification`，并用标准化后的 Rime 用户目录作为通知对象过滤条件。回调切换到主线程后，只处理当前 panel 的 input controller。
+
+input controller 必须同时满足 client 存在、session 非零且 librime 仍能找到该 session，才把私有 `F24` 直接交给当前引擎并更新候选界面。Lua processor 随后继续验证请求编号、当前输入、菜单状态和选择位置；任一条件不匹配即吞掉刷新而不改变候选。
 
 ## 用户词学习边界
 

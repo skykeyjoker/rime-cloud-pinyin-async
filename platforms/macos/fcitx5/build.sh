@@ -2,7 +2,8 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
-repo_root=$(cd "$script_dir/../.." && pwd)
+repo_root=$(cd "$script_dir/../../.." && pwd)
+common_dir="$script_dir/../common"
 dist_dir="$script_dir/dist"
 build_dir="$script_dir/.build"
 app_contents=$(printenv FCITX5_APP_CONTENTS || true)
@@ -36,7 +37,7 @@ swiftc \
   -O \
   -target "$architecture-apple-macos13.3" \
   -sdk "$sdk_path" \
-  "$script_dir/helper/CloudPinyinAsyncHelper.swift" \
+  "$common_dir/helper/CloudPinyinAsyncHelper.swift" \
   -o "$dist_dir/cloud_pinyin_async_helper"
 
 clang++ \

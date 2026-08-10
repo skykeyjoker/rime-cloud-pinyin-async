@@ -1,84 +1,36 @@
-# macOS / 鼠须管移植空间
+# macOS 实现
 
-状态：尚未实现，当前不能安装使用。
+macOS 下的 Fcitx5-Mac 与鼠须管共享同一套进程外网络 helper、文件协议和 Lua 候选逻辑，并分别实现安全的前端刷新通道。
 
-这个目录用于后续鼠须管版本。Windows 的 provider 行为和文件协议可以复用，但 Windows helper 依赖 `user32.dll`、前台窗口枚举与 `F24` 注入，不能直接搬到 macOS。
-
-## 目标目录
-
-实现完成后建议保持以下结构：
+## 目录
 
 ```text
 macos/
-├─ helper/                 # 后台 helper 源码
-├─ lua/
-│  └─ cloud_pinyin_async.lua
-├─ examples/
-│  └─ rime_frost.custom.yaml
-├─ build.sh                # 或项目实际需要的构建入口
-└─ README.md
+├─ common/                 # Swift helper 与共享 Lua
+├─ fcitx5/                 # Fcitx5 进程内刷新 addon、构建与安装说明
+└─ squirrel/               # 鼠须管源码补丁、构建与安装说明
 ```
 
-不要在尚无实现时提交空目录或复制 Windows 源码；目录应随着可运行组件出现。
+| 前端 | 刷新机制 | 状态 | 文档 |
+|---|---|---|---|
+| Fcitx5-Mac | addon 观察响应文件并直接向当前 Rime 引擎投递私有 F24 | 可用 | [`fcitx5`](fcitx5/README.md) |
+| 鼠须管 Squirrel | helper 发布目录限定通知，鼠须管在主线程刷新当前 librime session | 可用 | [`squirrel`](squirrel/README.md) |
 
-## 可以复用的契约
+两套实现均不生成全局键盘事件、不要求辅助功能权限，也不在 Lua 主线程进行 HTTP 请求。共享实现见 [`common`](common/README.md)，跨进程文件格式见 [`../../docs/file-protocol-v1.md`](../../docs/file-protocol-v1.md)。
 
-- [`../../docs/file-protocol-v1.md`](../../docs/file-protocol-v1.md) 定义的请求、响应、revision、心跳和来源代码。
-- 两个 provider 并发、先到先发布、第二来源合并的行为。
-- `delay_ms`、`timeout_ms`、`candidates_per_source`、`max_candidates` 等配置语义。
-- 本地/大模型同文候选优先，以及只执行一轮扩大候选池补查的语义。
-- `☁搜`、`☁谷`、`☁搜谷` 标记。
-- 上屏后由 Lua 调用 `Memory:update_userdict` 的学习模型。
+## 快速入口
 
-## 必须重新实现的部分
+Fcitx5-Mac：
 
-### 1. helper 运行时
+```bash
+FCITX5_SOURCE=../fcitx5-macos-source/fcitx5 ./platforms/macos/fcitx5/build.sh
+```
 
-需要选择 macOS 上稳定可分发的实现方式，并回答：
+鼠须管：
 
-- 是否依赖系统已有运行时；
-- 如何构建 universal binary（arm64 + x86_64，如仍需要）；
-- 如何实现单实例、心跳、空闲退出和崩溃恢复；
-- 是否需要签名、隔离属性处理或额外权限；
-- 如何随鼠须管启动或按需启动，同时不弹终端窗口。
+```bash
+./platforms/macos/squirrel/apply-squirrel-patch.sh ../squirrel
+SQUIRREL_SOURCE=../squirrel ./platforms/macos/squirrel/build.sh
+```
 
-### 2. 异步刷新通道
-
-这是移植的核心风险。需要找到一种方式，在 helper 写入新 revision 后通知当前鼠须管 context 重新组句，同时满足：
-
-- 不阻塞 librime/Lua 主线程；
-- 通知不会作为真实按键泄漏到前台应用；
-- 能核对当前输入、请求编号、菜单状态和选择位置；
-- 鼠须管未激活、切换应用或输入已提交时可以安全丢弃；
-- 不依赖不可接受的辅助功能权限，或明确说明权限代价。
-
-Windows 的全局 `F24` 注入仅是平台实现，不是跨平台协议要求。
-
-### 3. Lua 启动逻辑
-
-Windows Lua 写死了 `.exe` 文件名与 `cmd.exe /c start`。Mac 版本应替换 helper 路径、启动方式和刷新事件处理，但保持文件解析、过期校验和用户词学习语义一致。
-
-## 不接受的捷径
-
-- 在 Lua translator 中同步执行 `curl` 或其他阻塞 HTTP。
-- 等两个 provider 都完成后才显示第一份结果。
-- 只按输入文本、不按请求编号判断响应有效性。
-- 在 helper 中直接修改 Rime 用户数据库。
-- 声称“支持 macOS”但没有在鼠须管候选菜单中完成端到端实测。
-
-## 验收清单
-
-- [ ] 鼠须管正常输入期间无可感知卡顿。
-- [ ] 停止输入 500 ms 后才发起网络请求。
-- [ ] 搜狗与 Google 并发，先返回结果先显示。
-- [ ] 第二来源到达后可以合并刷新。
-- [ ] 快速继续输入时，旧结果永不进入新菜单。
-- [ ] 切换前台应用时不注入刷新或候选。
-- [ ] 云候选数量与插入位置遵守同一配置语义。
-- [ ] 云候选与本地/大模型同文时保留非云版本，并且补查最多一轮。
-- [ ] Space、数字键和鼠标上屏均能写入用户词库。
-- [ ] helper 崩溃、断网和 provider 超时不影响本地候选。
-- [ ] 日志不包含完整查询内容和候选正文。
-- [ ] Intel/Apple Silicon 支持范围与构建产物明确记录。
-
-全部完成后，再把根 README 的 macOS 状态改为“可用”。
+两个前端会使用各自的 Rime 用户目录。请先备份现有配置，再安装共享 Lua、helper 和对应前端的刷新组件，并将各自 `examples/rime_frost.custom.yaml` 合并到当前方案。

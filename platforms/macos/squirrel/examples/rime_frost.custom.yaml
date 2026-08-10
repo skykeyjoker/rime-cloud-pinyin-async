@@ -1,4 +1,4 @@
-# Fcitx5 macOS: keep 2 local candidates, then insert at most 5 cloud candidates.
+# macOS / Squirrel: keep 2 local candidates, then insert at most 5 cloud candidates.
 patch:
   "engine/processors/@before 0": lua_processor@*cloud_pinyin_async*processor
   "engine/translators/@before last": lua_translator@*cloud_pinyin_async*translator

@@ -1,0 +1,19 @@
+# macOS / Fcitx5-Mac: keep 2 local candidates, then insert at most 5 cloud candidates.
+patch:
+  "engine/processors/@before 0": lua_processor@*cloud_pinyin_async*processor
+  "engine/translators/@before last": lua_translator@*cloud_pinyin_async*translator
+  # Keep this after Frost's original uniquifier.
+  "engine/filters/@next": lua_filter@*cloud_pinyin_async*filter
+
+  cloud_pinyin_async:
+    delay_ms: 300
+    timeout_ms: 1200
+    candidates_per_source: 5
+    max_candidates: 5
+    insert_after: 2
+    min_input_length: 2
+    learn_to_user_dict: true
+    refill_on_duplicate: true
+    refill_delay_ms: 100
+    refill_candidates_per_source: 10
+    refill_max_candidates: 20

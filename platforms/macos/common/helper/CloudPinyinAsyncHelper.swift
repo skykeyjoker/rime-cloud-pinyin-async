@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 private let responseMagic = "RIME_CLOUD_V1"
+private let squirrelRefreshNotification = Notification.Name("SquirrelCloudPinyinResponseReadyNotification")
 
 private struct RequestState {
   let id: String
@@ -47,6 +48,7 @@ private final class CloudPinyinService {
   private let heartbeatURL: URL
   private let logURL: URL
   private let lockURL: URL
+  private let refreshNotificationObject: String
   private let logQueue = DispatchQueue(label: "rime.cloud-pinyin.log")
   private var lockDescriptor: Int32 = -1
 
@@ -57,6 +59,7 @@ private final class CloudPinyinService {
     heartbeatURL = directory.appendingPathComponent("cloud_pinyin_async.heartbeat")
     logURL = directory.appendingPathComponent("cloud_pinyin_async.log")
     lockURL = directory.appendingPathComponent("cloud_pinyin_async.lock")
+    refreshNotificationObject = directory.standardizedFileURL.path
   }
 
   func run() {
@@ -543,6 +546,12 @@ private final class CloudPinyinService {
     do {
       try (lines.joined(separator: "\n") + "\n")
         .write(to: responseURL, atomically: true, encoding: .utf8)
+      DistributedNotificationCenter.default().postNotificationName(
+        squirrelRefreshNotification,
+        object: refreshNotificationObject,
+        userInfo: nil,
+        deliverImmediately: true
+      )
     } catch {
       log("write response failed: \(error.localizedDescription)")
     }

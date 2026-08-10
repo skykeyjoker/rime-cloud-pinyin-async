@@ -1,0 +1,35 @@
+diff --git a/sources/SquirrelApplicationDelegate.swift b/sources/SquirrelApplicationDelegate.swift
+index 46a9f06..703e259 100644
+--- a/sources/SquirrelApplicationDelegate.swift
++++ b/sources/SquirrelApplicationDelegate.swift
+@@ -238,2 +238,9 @@ final class SquirrelApplicationDelegate: NSObject, NSApplicationDelegate, SPUSta
+     notifCenter.addObserver(forName: .init("SquirrelGetASCIIModeNotification"), object: nil, queue: nil, using: rimeGetASCIIMode)
++    notifCenter.addObserver(
++      self,
++      selector: #selector(rimeCloudPinyinResponseReady(_:)),
++      name: .init("SquirrelCloudPinyinResponseReadyNotification"),
++      object: SquirrelApp.userDir.standardizedFileURL.path,
++      suspensionBehavior: .deliverImmediately
++    )
+     // Suspension behavior matters: the default coalescing holds notifications
+@@ -424,1 +431,7 @@ private extension SquirrelApplicationDelegate {
++  @objc func rimeCloudPinyinResponseReady(_: Notification) {
++    DispatchQueue.main.async { [weak self] in
++      self?.panel?.inputController?.refreshCloudPinyin()
++    }
++  }
++
+   func rimeToggleASCIIMode(_ notification: Notification) {
+diff --git a/sources/SquirrelInputController.swift b/sources/SquirrelInputController.swift
+index ed2aef2..1494057 100644
+--- a/sources/SquirrelInputController.swift
++++ b/sources/SquirrelInputController.swift
+@@ -308,1 +308,8 @@ final class SquirrelInputController: IMKInputController {
++  func refreshCloudPinyin() {
++    guard client != nil, session != 0, rimeAPI.find_session(session) else { return }
++    if processKey(UInt32(XK_F24), modifiers: 0) {
++      rimeUpdate()
++    }
++  }
++
+   deinit {

@@ -1,6 +1,6 @@
 # 文件协议 RIME_CLOUD_V1
 
-本文定义 Lua 组件与平台 helper 之间的最小跨进程协议。Windows 已实现；macOS 移植应优先保持兼容，只有无法表达新平台需求时才升级 magic/version。
+本文定义 Lua 组件与平台 helper 之间的最小跨进程协议。Windows 小狼毫与 macOS Fcitx5-Mac 已实现；其他前端移植时应优先保持兼容，只有无法表达新平台需求时才升级 magic/version。
 
 ## 文件位置
 
@@ -43,7 +43,7 @@ request_id<TAB>context_input<TAB>query_input<TAB>delay_ms<TAB>timeout_ms<TAB>can
 
 空的 `query_input` 表示当前 context 已不适合显示云候选。helper 应清空响应并取消 pending 状态；已经发出的网络任务可以继续结束，但不得再发布该请求。
 
-Windows 当前实现对数值执行防御性约束：
+Windows 与 Fcitx5-Mac 当前实现都对数值执行以下防御性约束：
 
 - `delay_ms`: 100–3000
 - `timeout_ms`: 200–5000
@@ -52,7 +52,7 @@ Windows 当前实现对数值执行防御性约束：
 
 ### 补查仍使用 V1 请求
 
-过滤器发现云候选与本地词典、用户词或大模型候选同文后，不需要新增协议字段。首轮双源都完成时，Lua 使用新的 `request_id` 再写一条 V1 请求，并提高 `candidates_per_source` 与 `max_candidates`。Windows 默认补查值为每源 10、合并池 20，防抖 100 ms。
+过滤器发现云候选与本地词典、用户词或大模型候选同文后，不需要新增协议字段。首轮双源都完成时，Lua 使用新的 `request_id` 再写一条 V1 请求，并提高 `candidates_per_source` 与 `max_candidates`。当前两套实现的默认补查值均为每源 10、合并池 20，防抖 100 ms。
 
 补查请求编号包含 `-refill-`，同一输入最多补查一次。这里的较大 `max_candidates` 只控制 helper 返回池；Lua filter 仍按方案配置的显示上限截断。
 
@@ -95,7 +95,7 @@ Lua 必须同时验证：
 1786290000
 ```
 
-Windows Lua 将时间差不超过 6 秒视为 helper 存活，helper 每 2 秒更新一次。其他平台可以调整内部写入方式，但在共享 Lua 之前必须保持相同语义。
+当前两套 Lua 都将时间差不超过 6 秒视为 helper 存活，helper 每 2 秒更新一次。其他平台可以调整内部写入方式，但在共享 Lua 之前必须保持相同语义。
 
 ## 日志
 
@@ -113,6 +113,7 @@ Windows Lua 将时间差不超过 6 秒视为 helper 存活，helper 每 2 秒�
 刷新通知不属于文件格式，但属于完整实现：
 
 - Windows 当前在确认前台窗口未改变后发送私有 `F24`，Lua processor 吞掉该键并刷新未确认组句。
-- macOS 必须提供等价的异步通知方式，且不能把刷新按键泄漏到前台应用。
+- Fcitx5-Mac addon 每 25 ms 检查响应文件；只有当前聚焦输入上下文正在使用 Rime 时，才把私有 `F24` 直接投递给该输入法引擎。事件不会进入 macOS 按键流，Lua processor 负责吞掉并刷新未确认组句。
+- 鼠须管等其他 macOS 前端仍需提供等价的异步通知方式，且不能把刷新按键泄漏到前台应用。
 
 不论平台使用何种机制，文件中的请求编号和当前 Rime context 校验仍是最终安全边界。

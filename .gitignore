@@ -1,15 +1,19 @@
 # Build output
 *.exe
 *.pdb
+*.so
 **/bin/
 **/obj/
 **/dist/
+**/.build/
 
 # Runtime state written in the Rime user directory
 cloud_pinyin_async.request
 cloud_pinyin_async.response
 cloud_pinyin_async.heartbeat
 cloud_pinyin_async.log
+cloud_pinyin_async.lock
+cloud_pinyin_async.bridge
 test-state/
 **/test-state/
 

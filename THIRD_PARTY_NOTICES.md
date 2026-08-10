@@ -4,6 +4,7 @@
 
 - [rime-wenyun](https://github.com/xing133/rime-wenyun)，MIT License，Copyright (c) 2026 GengXinyuan。
 - [librime-cloud](https://github.com/hchunhui/librime-cloud)，早期 Rime 云输入实现与协议资料。
+- [Fcitx 5](https://github.com/fcitx/fcitx5)，LGPL-2.1-or-later。Fcitx5-Mac 刷新 addon 在构建时使用其公开头文件，并在运行时动态链接 Fcitx5-Mac 随附的库；仓库不提交这些第三方库的二进制副本。
 
 `rime-wenyun` 的 MIT 许可文本如下：
 

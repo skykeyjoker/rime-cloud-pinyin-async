@@ -2,13 +2,14 @@
 
 为 Rime 提供进程外、非阻塞的双源云拼音。用户停止输入一小段时间后，平台 helper 并发查询搜狗和 Google Input Tools；先返回的来源先进入候选菜单，另一来源随后合并。网络超时、断网和过期结果不会阻塞正常按键处理。
 
-> 当前可用版本：Windows 小狼毫全拼。macOS 鼠须管目录已经建立，但刷新后端尚未实现，不能直接使用。
+> 当前可用版本：Windows 小狼毫全拼、macOS Fcitx5-Mac 全拼。macOS 鼠须管仍处于规划阶段。
 
 ## 平台状态
 
 | 平台 | 前端 | 状态 | 实现目录 |
 |---|---|---|---|
 | Windows x64 | 小狼毫 Weasel | 可用，已在 Weasel 0.17.4 / librime 1.13.1 验证 | [`platforms/windows`](platforms/windows/README.md) |
+| macOS arm64 | Fcitx5-Mac | 可用，已在 Fcitx5-Mac 0.3.4 / fcitx5 5.1.21 验证 | [`platforms/fcitx5-macos`](platforms/fcitx5-macos/README.md) |
 | macOS | 鼠须管 Squirrel | 规划中，尚不可用 | [`platforms/macos`](platforms/macos/README.md) |
 
 ## 设计目标
@@ -35,13 +36,20 @@
 │  │  ├─ examples/             # 白霜配置示例
 │  │  ├─ build.ps1
 │  │  └─ README.md
+│  ├─ fcitx5-macos/
+│  │  ├─ helper/               # Swift 进程外网络助手
+│  │  ├─ lua/                  # Fcitx5-Mac Lua 组件
+│  │  ├─ fcitx-addon/          # 进程内安全刷新桥
+│  │  ├─ examples/             # 白霜配置示例
+│  │  ├─ build.sh
+│  │  └─ README.md
 │  └─ macos/
 │     └─ README.md             # 鼠须管移植契约与验收清单
 ├─ LICENSE
 └─ THIRD_PARTY_NOTICES.md
 ```
 
-当前没有为了目录对称而制造“公共核心”源码：Windows helper 仍是一个已经实测的整体。真正跨平台且稳定的部分先固化为 [`docs/file-protocol-v1.md`](docs/file-protocol-v1.md)；Mac 实现验证完成后，再根据实际重复代码抽取 provider 层。
+当前没有为了目录对称而制造“公共核心”源码：Windows 使用 C# helper，Fcitx5-Mac 使用 Swift helper，并各自保持可独立构建。真正跨平台且稳定的部分固化为 [`docs/file-protocol-v1.md`](docs/file-protocol-v1.md)；后续只有在重复代码和行为边界足够稳定时才抽取 provider 层。
 
 ## Windows 快速开始
 
@@ -52,9 +60,18 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 随后按 [`platforms/windows/README.md`](platforms/windows/README.md) 将 helper、Lua 文件和配置安装到小狼毫用户目录。
 
+## Fcitx5-Mac 快速开始
+
+```bash
+git clone --recurse-submodules https://github.com/fcitx-contrib/fcitx5-macos.git ../fcitx5-macos-source
+FCITX5_SOURCE=../fcitx5-macos-source/fcitx5 ./platforms/fcitx5-macos/build.sh
+```
+
+Fcitx5 插件必须和已安装应用使用兼容的 fcitx5 ABI。构建完成后，按 [`platforms/fcitx5-macos/README.md`](platforms/fcitx5-macos/README.md) 安装 Swift helper、Lua、刷新插件和白霜配置补丁。
+
 本仓库的白霜示例默认：
 
-- 停止输入 `500 ms` 后查询；
+- Windows 停止输入 `500 ms` 后查询，Fcitx5-Mac 为 `300 ms`；
 - 搜狗、Google 各取最多 5 个；
 - 去重合并后最多显示 5 个云候选；
 - 前两个位置保留本地候选，云候选从第 3 位开始；
@@ -82,9 +99,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 helper 日志只记录请求长度、耗时和状态，不记录查询内容；被选择的云词会按功能设计保存在本机 Rime 用户词库中。请求、响应、心跳和日志均为运行时文件，不进入 Git。
 
-## 参与 macOS 移植
+## macOS 前端说明
 
-先阅读 [`platforms/macos/README.md`](platforms/macos/README.md)。Mac 版本最关键的工作不是重写 HTTP，而是找到鼠须管中安全、可验证且不阻塞输入的候选刷新通道。不得退回 Lua 中同步执行 `curl` 的实现。
+Fcitx5-Mac 已通过进程内 addon 提供安全刷新通道，详见 [`platforms/fcitx5-macos/README.md`](platforms/fcitx5-macos/README.md)。鼠须管是不同的前端，仍需单独实现等价刷新通道，移植约束见 [`platforms/macos/README.md`](platforms/macos/README.md)。任何 macOS 前端都不得退回 Lua 中同步执行 `curl` 的实现。
 
 ## 致谢与许可
 

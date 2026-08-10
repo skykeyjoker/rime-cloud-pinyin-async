@@ -1,0 +1,59 @@
+# Fcitx5-Mac 实现
+
+这套实现把 Windows 小狼毫版本的文件协议、双源并发、候选去重/补位与用户词学习逻辑移植到 Fcitx5 macOS。它不会在 Rime/Lua 主线程发起网络请求，也不需要 macOS“辅助功能”权限。
+
+## 组成
+
+- lua/cloud_pinyin_async.lua：沿用 Windows 版候选逻辑，只替换 helper 启动方式。
+- helper/CloudPinyinAsyncHelper.swift：300 ms 防抖后并发请求搜狗和 Google，先到先发布，写入同一份版本化响应文件。
+- fcitx-addon/cloudpinyinrefresh.cpp：每 25 ms 检查一次响应文件；文件更新时，仅向当前已聚焦的 Rime 引擎直接投递私有 F24，事件不会进入 macOS 按键流。
+
+## 构建
+
+需要当前已安装的 Fcitx5.app，以及与它 ABI 对应的 fcitx5-macos/fcitx5 源码。可以把官方仓库克隆到本仓库旁边：
+
+```bash
+git clone --recurse-submodules https://github.com/fcitx-contrib/fcitx5-macos.git ../fcitx5-macos-source
+FCITX5_SOURCE=../fcitx5-macos-source/fcitx5 ./platforms/fcitx5-macos/build.sh
+```
+
+脚本默认寻找同级的 `fcitx5-macos-source/fcitx5`，也可以通过 `FCITX5_SOURCE` 和 `FCITX5_APP_CONTENTS` 显式指定路径。
+
+当前脚本构建本机架构。Apple Silicon 和 Intel 应分别在对应机器上构建后再用 lipo 合并；不要拿一端的 Fcitx5 动态库交叉链接另一端。
+
+## 安装位置
+
+- ~/.local/share/fcitx5/rime/lua/cloud_pinyin_async.lua
+- ~/.local/share/fcitx5/rime/cloud_pinyin_async_helper
+- ~/Library/fcitx5/lib/fcitx5/libcloudpinyinrefresh.so
+- ~/Library/fcitx5/share/fcitx5/addon/cloudpinyinrefresh.conf
+
+把 examples/rime_frost.custom.yaml 中的补丁合并进现有配置后重新部署并重启 Fcitx5。
+
+示例安装命令（执行前先备份自己的 Rime 配置）：
+
+```bash
+mkdir -p ~/.local/share/fcitx5/rime/lua
+mkdir -p ~/Library/fcitx5/lib/fcitx5
+mkdir -p ~/Library/fcitx5/share/fcitx5/addon
+install -m 0644 platforms/fcitx5-macos/lua/cloud_pinyin_async.lua ~/.local/share/fcitx5/rime/lua/
+install -m 0755 platforms/fcitx5-macos/dist/cloud_pinyin_async_helper ~/.local/share/fcitx5/rime/
+install -m 0755 platforms/fcitx5-macos/dist/libcloudpinyinrefresh.so ~/Library/fcitx5/lib/fcitx5/
+install -m 0644 platforms/fcitx5-macos/fcitx-addon/cloudpinyinrefresh.conf ~/Library/fcitx5/share/fcitx5/addon/
+```
+
+运行时会在 Rime 用户目录生成 request、response、heartbeat、lock、log 和 bridge 文件。日志只记录请求编号、输入长度、耗时与状态，不保存完整查询内容或候选正文。
+
+## 已验证范围
+
+已在 Apple Silicon、Fcitx5-Mac 0.3.4 / fcitx5 5.1.21 环境验证：
+
+- 搜狗与 Google 并发查询，并按 revision 分两次刷新；
+- 云候选按配置插入，保留本地/用户词/万象同文候选并补查一次；
+- 选择云候选后写入当前方案用户词典；
+- addon 只刷新当前有焦点的 Rime 输入上下文；
+- Fcitx5 重启后 helper 可继续复用，断网或单源超时不阻塞本地输入。
+
+这是 Fcitx5-Mac 专用实现，不适用于鼠须管。动态插件与 Fcitx5 ABI 相关，升级 Fcitx5-Mac 后应使用匹配源码重新构建并复测。
+
+如果重启后菜单为空或暂时不能输入，先切换到 ABC，再切回“小企鹅”，让 macOS 重新建立 InputMethodKit 连接；不要通过反复强制结束进程代替正常重启。

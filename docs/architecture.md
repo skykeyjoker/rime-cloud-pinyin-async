@@ -29,12 +29,13 @@
 5. 第一个来源完成后，helper 再次读取当前请求编号。仍有效才写 revision 1，并通过平台刷新通道通知前端。
 6. Lua 收到通知后核对请求编号、输入、候选菜单和选择位置，全部一致才刷新未确认组句。
 7. 第二个来源完成后，helper 去重合并并发布 revision 2；若内容没有变化则不重复刷新。
-8. `uniquifier` 后的 cloud filter 检查 genuine candidates。若同文候选同时包含云端和本地词典、用户词或大模型版本，只保留非云版本。
+8. cloud filter 在其他排序 filter 和 `uniquifier` 之前先缓存一个有界的本地候选窗口，按本地原始顺序保留 `insert_after` 个候选，再插入云候选；同文时只保留非云版本。
 9. 首轮双源均结束且过滤重复项造成云候选缺口时，Lua 只补查一次：使用新请求编号、较短防抖和更大的候选池；最终显示仍由 `max_candidates` 截断。
 10. 用户选择云候选后，Lua 通过实际上屏文本确认选择，并显式写入当前方案用户词库；被抑制的本地/大模型候选不走云词显式学习路径。
 
 旧 HTTP 任务不直接修改候选菜单。任何响应只有通过“请求编号仍相同”和“当前 Rime context 仍匹配”两层检查后才可见。
 候选确认不会稳定触发 `update_notifier`，所以 Lua 还会在 `select_notifier` 中重新调度；即使完整输入不变，只要当前 segment 推进，就会为剩余拼音创建新请求。
+cloud filter 在候选菜单重建过程中运行，此时 `Context.has_menu()` 会暂时为假；filter 因而只校验请求编号、完整输入和当前 segment，不把菜单的瞬时状态误判为过期响应。processor 真正激活响应时仍要求菜单存在。
 
 ## 配置语义
 
@@ -67,7 +68,9 @@ provider URL、请求解析和合并规则在不同语言实现中应保持行�
 
 ## 重复过滤与补查
 
-cloud filter 位于 `uniquifier` 之后。`uniquifier` 将同文本的 genuine candidates 保存在同一个包装候选中，filter 因而可以区分“纯云候选”和“同时存在非云版本的候选”。后者优先级为用户词版本优先，其次为第一个非云 genuine candidate；云版本被标记为 suppressed，不参与显式云词学习。
+cloud translator 使用高权重，cloud filter 因而必须位于 `long_word_filter` 等改序 filter 和 `uniquifier` 之前。否则云候选会先改变长词过滤器的基准，例如输入 `xian` 时把“西安、锡安”错误地提到原始本地首选“先、线”之前。
+
+filter 最多预读 50 个本地候选：先按原顺序输出 `insert_after` 个本地候选，再插入云候选，最后继续本地候选。同文云候选在这个窗口内会被标记为 suppressed，不参与显式云词学习；已有的 mixed genuine candidate 仍优先采用用户词版本，其次采用第一个非云版本。
 
 补查不是无限重试：只允许从普通首轮请求进入一次带 `-refill-` 标记的新请求。默认把每源解析量从 5 扩大到 10、双源合并池扩大到 20，然后由 filter 删除本地/大模型重复项并只输出 `max_candidates` 个云候选。若扩大后仍不足，不再联网。
 

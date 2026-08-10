@@ -15,6 +15,7 @@ local REQUEST_FILE = "cloud_pinyin_async.request"
 local RESPONSE_FILE = "cloud_pinyin_async.response"
 local HEARTBEAT_FILE = "cloud_pinyin_async.heartbeat"
 local HELPER_FILE = "cloud_pinyin_async_helper.exe"
+local LOCAL_DUPLICATE_SCAN_LIMIT = 50
 local RESPONSE_MAGIC = "RIME_CLOUD_V1"
 
 local user_dir = rime_api.get_user_data_dir()
@@ -103,6 +104,7 @@ local function remember_response(response)
         local expired = table.remove(response_order, 1)
         response_history[expired] = nil
     end
+    return token
 end
 
 local function parse_response(text)
@@ -272,9 +274,13 @@ local function current_segment(context)
     return composition:back()
 end
 
-local function current_request_target(context, config)
+local function current_request_target(context, config, allow_menu_rebuild)
     local context_input = context.input or ""
-    if not context:has_menu() then
+    -- A filter runs while Rime is rebuilding the candidate menu, when
+    -- Context.has_menu() is temporarily false even though composition and the
+    -- active abc segment are valid. Scheduling still requires an existing
+    -- menu; response validation inside the filter may opt into this state.
+    if not allow_menu_rebuild and not context:has_menu() then
         return nil
     end
 
@@ -310,13 +316,13 @@ local function current_request_target(context, config)
     }
 end
 
-local function response_matches_target(context, response, config)
+local function response_matches_target(context, response, config, allow_menu_rebuild)
     if not response or
         response.id ~= context:get_property(REQUEST_PROPERTY) then
         return nil
     end
 
-    local target = current_request_target(context, config)
+    local target = current_request_target(context, config, allow_menu_rebuild)
     if not target or
         response.input ~= target.context_input or
         response.query ~= target.query_input then
@@ -504,7 +510,7 @@ local function request_duplicate_refill(context, response, config)
     if not config.refill_on_duplicate or
         not providers_finished(response) or
         response.id:find(REFILL_MARKER, 1, true) or
-        not response_matches_target(context, response, config) then
+        not response_matches_target(context, response, config, true) then
         return false
     end
 
@@ -855,7 +861,7 @@ end
 local function filter_func(input, env)
     local context = env.engine.context
     local response = active_response(context)
-    if not response_matches_target(context, response, env.cloud_config) then
+    if not response_matches_target(context, response, env.cloud_config, true) then
         for candidate in input:iter() do
             yield(candidate)
         end
@@ -863,10 +869,19 @@ local function filter_func(input, env)
     end
 
     response.suppressed_texts = response.suppressed_texts or {}
+    -- This filter must run before order-changing filters such as Frost's
+    -- long_word_filter. Cloud candidates carry a deliberately high quality,
+    -- so letting those filters see the cloud stream first changes their
+    -- baseline and can move words such as "西安" ahead of the native local
+    -- leaders "先、线".
+    --
+    -- Buffer a small local window before yielding anything. Besides preserving
+    -- the native local head, the window lets us suppress same-text cloud items
+    -- without relying on uniquifier's lazy, already-yielded candidate wrappers.
     local cloud_candidates = {}
-    local local_count = 0
+    local local_candidates = {}
+    local local_texts = {}
     local cloud_count = 0
-    local inserted = false
     local refill_requested = false
     local seen_text = {}
 
@@ -875,79 +890,104 @@ local function filter_func(input, env)
         return candidate.text or genuine.text or ""
     end
 
-    local function emit_cloud()
-        if inserted then
+    local function suppress_cloud_text(text)
+        if text == "" then
             return
         end
-        inserted = true
-        for _, candidate in ipairs(cloud_candidates) do
-            if cloud_count >= env.cloud_config.max_candidates then
-                break
-            end
-            local text = candidate_text(candidate)
-            if text == "" or not seen_text[text] then
-                yield(candidate)
-                if text ~= "" then
-                    seen_text[text] = true
-                end
-                cloud_count = cloud_count + 1
-            end
+        response.suppressed_texts[text] = true
+        if not refill_requested then
+            refill_requested = request_duplicate_refill(
+                context,
+                response,
+                env.cloud_config)
         end
     end
 
+    local function remember_local(candidate, contains_cloud)
+        local text = candidate_text(candidate)
+        if text == "" or not local_texts[text] then
+            local_candidates[#local_candidates + 1] = candidate
+            if text ~= "" then
+                local_texts[text] = true
+            end
+        end
+        if contains_cloud then
+            suppress_cloud_text(text)
+        end
+    end
+
+    local scan_limit = math.max(
+        LOCAL_DUPLICATE_SCAN_LIMIT,
+        math.max(0, env.cloud_config.insert_after))
     for candidate in input:iter() do
-        -- `uniquifier` retains every genuine candidate. If a cloud candidate
-        -- has the same text as a local dictionary/user phrase/model result,
-        -- keep the non-cloud variant and use a larger one-shot cloud request
-        -- to refill the resulting display gap.
+        local local_variant, contains_cloud = preferred_local_variant(candidate)
+        if contains_cloud and local_variant then
+            remember_local(local_variant, true)
+        elseif contains_cloud then
+            cloud_candidates[#cloud_candidates + 1] = candidate
+        else
+            remember_local(candidate, false)
+        end
+        if #local_candidates >= scan_limit then
+            break
+        end
+    end
+
+    local function emit(candidate)
+        local text = candidate_text(candidate)
+        if text ~= "" and seen_text[text] then
+            return false
+        end
+        yield(candidate)
+        if text ~= "" then
+            seen_text[text] = true
+        end
+        return true
+    end
+
+    local local_head_count = math.min(
+        #local_candidates,
+        math.max(0, env.cloud_config.insert_after))
+    for index = 1, local_head_count do
+        emit(local_candidates[index])
+    end
+
+    for _, candidate in ipairs(cloud_candidates) do
+        if cloud_count >= env.cloud_config.max_candidates then
+            break
+        end
+        local text = candidate_text(candidate)
+        if text ~= "" and local_texts[text] then
+            suppress_cloud_text(text)
+        elseif emit(candidate) then
+            cloud_count = cloud_count + 1
+        end
+    end
+
+    for index = local_head_count + 1, #local_candidates do
+        emit(local_candidates[index])
+    end
+
+    -- The high cloud quality normally puts every cloud item inside the scan
+    -- window. Still handle a late item defensively for schemas with additional
+    -- translators or custom quality rules.
+    for candidate in input:iter() do
         local local_variant, contains_cloud = preferred_local_variant(candidate)
         if contains_cloud and local_variant then
             local text = candidate_text(local_variant)
-            if text ~= "" then
-                response.suppressed_texts[text] = true
-            end
-            if not refill_requested then
-                refill_requested = request_duplicate_refill(context, response, env.cloud_config)
-            end
-            if text == "" or not seen_text[text] then
-                yield(local_variant)
-                if text ~= "" then
-                    seen_text[text] = true
-                end
-                local_count = local_count + 1
-                if local_count >= env.cloud_config.insert_after then
-                    emit_cloud()
-                end
-            end
+            suppress_cloud_text(text)
+            emit(local_variant)
         elseif contains_cloud then
-            if inserted then
-                local text = candidate_text(candidate)
-                if cloud_count < env.cloud_config.max_candidates and
-                    (text == "" or not seen_text[text]) then
-                    yield(candidate)
-                    if text ~= "" then
-                        seen_text[text] = true
-                    end
-                    cloud_count = cloud_count + 1
-                end
-            else
-                cloud_candidates[#cloud_candidates + 1] = candidate
+            local text = candidate_text(candidate)
+            if text ~= "" and local_texts[text] then
+                suppress_cloud_text(text)
+            elseif cloud_count < env.cloud_config.max_candidates and emit(candidate) then
+                cloud_count = cloud_count + 1
             end
         else
-            local text = candidate_text(candidate)
-            if text == "" or not seen_text[text] then
-                yield(candidate)
-                if text ~= "" then
-                    seen_text[text] = true
-                end
-                local_count = local_count + 1
-                if local_count >= env.cloud_config.insert_after then
-                    emit_cloud()
-                end
-            end
+            emit(candidate)
         end
     end
-    emit_cloud()
 end
 
 M.filter = {
@@ -958,6 +998,7 @@ M.filter = {
 M._test = {
     current_request_target = current_request_target,
     response_matches_target = response_matches_target,
+    remember_response = remember_response,
 }
 
 return M

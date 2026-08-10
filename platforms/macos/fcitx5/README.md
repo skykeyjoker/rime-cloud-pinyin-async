@@ -30,7 +30,7 @@ FCITX5_SOURCE=../fcitx5-macos-source/fcitx5 ./platforms/macos/fcitx5/build.sh
 - `~/Library/fcitx5/lib/fcitx5/libcloudpinyinrefresh.so`
 - `~/Library/fcitx5/share/fcitx5/addon/cloudpinyinrefresh.conf`
 
-把 `examples/rime_frost.custom.yaml` 中的补丁合并进现有配置后重新部署并重启 Fcitx5。
+把 `examples/rime_frost.custom.yaml` 中的补丁合并进现有配置后重新部署并重启 Fcitx5。cloud filter 必须保持在 `engine/filters` 最前面，避免白霜的长词优先逻辑改变原始本地前排。
 
 示例安装命令（执行前先备份自己的 Rime 配置）：
 
@@ -51,6 +51,7 @@ install -m 0644 platforms/macos/fcitx5/fcitx-addon/cloudpinyinrefresh.conf ~/Lib
 已在 Apple Silicon、Fcitx5-Mac 0.3.4 / fcitx5 5.1.21 环境验证：
 
 - 搜狗与 Google 并发查询，并按 revision 分两次刷新；
+- `xian` 等单音节输入保留白霜原始本地首选，再按配置插入云候选；
 - 云候选按配置插入，保留本地/用户词/万象同文候选并补查一次；
 - 选择云候选后写入当前方案用户词典；
 - addon 只刷新当前有焦点的 Rime 输入上下文；

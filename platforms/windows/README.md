@@ -79,7 +79,7 @@ platforms/windows/dist/cloud_pinyin_async_helper.exe
 patch:
   "engine/processors/@before 0": lua_processor@*cloud_pinyin_async*processor
   "engine/translators/@before last": lua_translator@*cloud_pinyin_async*translator
-  "engine/filters/@next": lua_filter@*cloud_pinyin_async*filter
+  "engine/filters/@before 0": lua_filter@*cloud_pinyin_async*filter
 
   cloud_pinyin_async:
     delay_ms: 500
@@ -95,7 +95,7 @@ patch:
     refill_max_candidates: 20
 ```
 
-cloud filter 应位于方案原有的 `uniquifier` 之后。`insert_after: 2` 先输出两个本地候选，因此云候选从第 3 位开始；`max_candidates: 5` 是两个来源去重合并后的总上限。
+cloud filter 必须位于 `long_word_filter` 等改序 filter 和 `uniquifier` 之前。`insert_after: 2` 会先保留白霜原始前两个本地候选，因此云候选从第 3 位开始；`max_candidates: 5` 是两个来源去重合并后的总上限。
 
 如果某个云候选已由本地词典、用户词库或大模型给出，filter 会保留非云版本并过滤带 `☁` 的版本。首轮搜狗和 Google 都结束后，只要发生过这种过滤，就用更大的候选池补查一次，尽量把 5 个云候选补满；扩大后仍不足时不再请求。
 
@@ -103,16 +103,15 @@ cloud filter 应位于方案原有的 `uniquifier` 之后。`insert_after: 2` �
 
 ## 第 1 位模式
 
-如需云候选直接进入菜单前部，不挂载 cloud filter：
+如需云候选直接进入菜单前部，保留 cloud filter 并把 `insert_after` 改为 `0`：
 
 ```yaml
 patch:
-  "engine/processors/@before 0": lua_processor@*cloud_pinyin_async*processor
-  "engine/translators/@before last": lua_translator@*cloud_pinyin_async*translator
-  # 不配置 engine/filters 中的 cloud_pinyin_async filter
+  cloud_pinyin_async:
+    insert_after: 0
 ```
 
-此时 `insert_after` 不参与排序。即使在 filter 模式把它设为 `0`，当前过滤器也需要先读取一个本地候选，不能做到绝对第 1 位。
+filter 仍会处理同文去重与补查，但显示时不再预留本地位置。
 
 ## 参数
 
@@ -122,7 +121,7 @@ patch:
 | `timeout_ms` | `900` | 每个云源的请求超时 |
 | `candidates_per_source` | `5` | 每个来源最多读取多少候选 |
 | `max_candidates` | `8` | 两个来源去重合并后的总上限 |
-| `insert_after` | `3` | 仅挂载 filter 时，先输出多少个本地候选 |
+| `insert_after` | `3` | 插入云候选前保留多少个原始本地候选；设为 `0` 时云候选可从第 1 位开始 |
 | `min_input_length` | `2` | 触发查询的最短输入长度 |
 | `learn_to_user_dict` | `true` | 云候选上屏后是否写入当前方案用户词库 |
 | `refill_on_duplicate` | `true` | 过滤本地/大模型重复项后是否补查一次 |

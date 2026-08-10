@@ -2,8 +2,8 @@
 patch:
   "engine/processors/@before 0": lua_processor@*cloud_pinyin_async*processor
   "engine/translators/@before last": lua_translator@*cloud_pinyin_async*translator
-  # 放在方案原有的 uniquifier 之后。
-  "engine/filters/@next": lua_filter@*cloud_pinyin_async*filter
+  # 放在 long_word_filter/uniquifier 之前，保留白霜原始本地前排。
+  "engine/filters/@before 0": lua_filter@*cloud_pinyin_async*filter
 
   cloud_pinyin_async:
     delay_ms: 500

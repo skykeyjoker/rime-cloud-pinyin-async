@@ -2,8 +2,8 @@
 patch:
   "engine/processors/@before 0": lua_processor@*cloud_pinyin_async*processor
   "engine/translators/@before last": lua_translator@*cloud_pinyin_async*translator
-  # Keep this after Frost's original uniquifier.
-  "engine/filters/@next": lua_filter@*cloud_pinyin_async*filter
+  # Run before long_word_filter/uniquifier so Frost's native local head stays intact.
+  "engine/filters/@before 0": lua_filter@*cloud_pinyin_async*filter
 
   cloud_pinyin_async:
     delay_ms: 300

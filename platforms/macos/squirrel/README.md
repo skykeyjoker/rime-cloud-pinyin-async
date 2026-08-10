@@ -70,7 +70,7 @@ CODE_SIGN_IDENTITY="Apple Development: your identity" \
    install -m 0755 platforms/macos/squirrel/dist/cloud_pinyin_async_helper ~/Library/Rime/
    ```
 
-2. 将 `examples/rime_frost.custom.yaml` 中的补丁合并进自己的 `rime_frost.custom.yaml`，不要覆盖其他自定义配置。
+2. 将 `examples/rime_frost.custom.yaml` 中的补丁合并进自己的 `rime_frost.custom.yaml`，不要覆盖其他自定义配置；cloud filter 必须保持在 `engine/filters` 最前面，避免后续长词过滤器改变原始本地前排。
 
 3. 用构建产物替换现有鼠须管。用户级安装位置为 `~/Library/Input Methods/Squirrel.app`；若现有版本位于 `/Library/Input Methods`，应在备份后替换原位置，而不是再安装第二份。
 
@@ -100,6 +100,7 @@ CODE_SIGN_IDENTITY="Apple Development: your identity" \
 - 停止输入后按配置防抖查询；
 - 搜狗与 Google 先到先显示、后到合并；
 - 云候选显示 `☁搜`、`☁谷` 或 `☁搜谷`；
+- `xian` 等单音节输入保留白霜原始本地首选；
 - 过期响应不会进入新的候选菜单；
 - 本地、用户词和万象同文候选优先，并且最多补查一轮；
 - 云候选上屏后写入当前方案用户词典；

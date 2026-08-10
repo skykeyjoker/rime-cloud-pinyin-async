@@ -201,6 +201,7 @@ CODE_SIGN_IDENTITY="Apple Development: your identity" \
 3. 网络请求期间继续输入，确认本地候选和按键没有卡顿。
 4. 快速修改原始拼音，确认旧查询结果不会进入新的候选菜单。
 5. 选择一个云候选后再次输入，检查候选排序是否体现用户词学习。
+6. 输入 `xian`，确认白霜原始首选“先、线”仍在云候选之前。
 
 来源标记含义：
 
@@ -228,6 +229,8 @@ CODE_SIGN_IDENTITY="Apple Development: your identity" \
 | `refill_on_duplicate` | `true` | 过滤同文本地/模型候选后是否补查一次 |
 
 完整参数和排序模式见各平台 README。
+
+`cloud_pinyin_async` filter 必须放在 `engine/filters` 最前面，或至少位于 `long_word_filter` 等改序 filter 和 `uniquifier` 之前；否则高权重云候选会干扰方案原有的本地排序。
 
 ## 隐私说明
 

@@ -9,6 +9,7 @@ windows/
 ├─ src/CloudPinyinAsyncHelper.cs
 ├─ lua/cloud_pinyin_async.lua
 ├─ examples/rime_frost.custom.yaml
+├─ tests/weak_network_regression.ps1
 ├─ build.ps1
 └─ README.md
 ```
@@ -16,7 +17,9 @@ windows/
 ## 工作方式
 
 - Lua processor 监听 Rime context，并把请求写到用户目录。
-- C# helper 在 Weasel 进程之外完成防抖和并发 HTTP。
+- C# helper 在 Weasel 进程之外完成防抖和并发 HTTP；主循环不等待网络。
+- 搜狗和 Google 各自只有一个长期 worker 和一个“最新请求”槽。某一路 DNS
+  阻塞时不会停止心跳、阻塞另一来源或无限创建任务。
 - 搜狗或 Google 每完成一路，就发布新的响应 revision。
 - helper 仅在前台窗口仍相同时注入私有 `F24`；Lua 吞掉该事件并刷新候选。
 - 用户上屏后，Lua 显式调用 `Memory:update_userdict`。
@@ -46,6 +49,15 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```text
 platforms/windows/dist/cloud_pinyin_async_helper.exe
 ```
+
+构建后执行确定性弱网回归：
+
+```powershell
+.\platforms\windows\tests\weak_network_regression.ps1
+```
+
+测试模式不会访问公网或发送 `F24`。它会让 Google worker 阻塞 10 秒，验证搜狗
+首个结果与下一次请求仍能及时返回、硬截止生效且心跳持续更新。
 
 也可以指定输出路径：
 
@@ -118,7 +130,7 @@ filter 仍会处理同文去重与补查，但显示时不再预留本地位置�
 | 配置项 | 默认值 | 说明 |
 |---|---:|---|
 | `delay_ms` | `500` | 输入停止多久后开始联网 |
-| `timeout_ms` | `900` | 每个云源的请求超时 |
+| `timeout_ms` | `900` | 每个云源参与当前请求的硬截止时间；迟到结果会被忽略 |
 | `candidates_per_source` | `5` | 每个来源最多读取多少候选 |
 | `max_candidates` | `8` | 两个来源去重合并后的总上限 |
 | `insert_after` | `3` | 插入云候选前保留多少个原始本地候选；设为 `0` 时云候选可从第 1 位开始 |
@@ -133,10 +145,13 @@ filter 仍会处理同文去重与补查，但显示时不再预留本地位置�
 
 helper 是当前 Windows 会话中的常驻单例：
 
-- 方案初始化时启动；写请求时也会检查并按需补拉起。
+- 只在方案初始化时检查并按需启动；普通输入和补查路径绝不创建进程。
 - session-local mutex 防止重复实例。
-- 每 20 ms 检查请求文件，每 2 秒更新心跳。
-- 心跳 6 秒未更新即视为失效，Lua 下次请求时重新启动。
+- 每 50 ms 检查一次请求文件元数据，仅在文件变化时读取内容；每 2 秒更新心跳。
+- 主循环不等待 HTTP。每个来源只有一个 worker，忙碌期间的新请求覆盖旧 pending；
+  当前请求达到 `timeout_ms` 后立即关闭，迟到结果丢弃。
+- 心跳 6 秒未更新即视为失效；为避免在 Rime 输入线程中启动进程，只在下一次
+  方案初始化时重试。
 - 当前没有空闲退出；关闭小狼毫后 helper 仍可能驻留。
 
 详见 [`../../docs/architecture.md`](../../docs/architecture.md)。
@@ -163,6 +178,7 @@ cloud_pinyin_async.log
 5. 快速修改输入，确认旧拼音结果不会进入新菜单。
 6. 选中云候选后重复输入，确认用户词库已经记忆。
 7. 用本地或大模型已经能给出的词测试，确认只显示非云版本；日志出现一次 `duplicate refill requested`，随后最多仍显示 5 个纯云新增候选。
+8. 运行 `tests/weak_network_regression.ps1`，确认输出 `Result: PASS`。
 
 ## 故障排查
 
@@ -170,4 +186,4 @@ cloud_pinyin_async.log
 - 配置没有变化：检查最终生成的 `build/<方案>.schema.yaml`。
 - 只有一个来源：另一端点可能超时或临时失效，本地输入不受影响。
 - 双拼不触发：这是当前限制，Windows 实现只接受全拼。
-- helper 存活但无响应：结束该 helper，下一次输入会在心跳过期后重新拉起。
+- helper 存活但无响应：结束该 helper，再切换一次方案或重启小狼毫触发初始化。

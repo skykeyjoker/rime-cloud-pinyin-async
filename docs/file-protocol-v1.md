@@ -37,7 +37,7 @@ request_id<TAB>context_input<TAB>query_input<TAB>delay_ms<TAB>timeout_ms<TAB>can
 | 2 | `context_input` | Rime context 中的完整原始全拼输入，可含撇号；分段选词后仍保持完整，用于拒绝过期响应 |
 | 3 | `query_input` | 当前尚未确认的 `abc` segment，发送 provider 前去掉撇号 |
 | 4 | `delay_ms` | 防抖时间 |
-| 5 | `timeout_ms` | 单 provider 超时 |
+| 5 | `timeout_ms` | 单 provider 参与当前请求的硬截止时间 |
 | 6 | `candidates_per_source` | 单来源候选上限 |
 | 7 | `max_candidates` | 双源去重后的总上限 |
 
@@ -51,6 +51,10 @@ Windows 与 macOS 共享 helper 都对数值执行以下防御性约束：
 - `timeout_ms`: 200–5000
 - `candidates_per_source`: 1–10
 - `max_candidates`: 1–20
+
+协议中的超时约束候选是否还能发布，不要求底层网络 API 已经终止。Windows 会在
+截止时关闭当前请求并忽略迟到结果；每个来源使用单 worker 和单 pending 槽，即使
+操作系统 DNS 调用晚于截止返回，也不会阻塞心跳或形成无界任务积压。
 
 ### 补查仍使用 V1 请求
 

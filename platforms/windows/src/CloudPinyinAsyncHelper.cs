@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -6,7 +7,6 @@ using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
 internal static class CloudPinyinAsyncHelper
@@ -16,17 +16,22 @@ internal static class CloudPinyinAsyncHelper
     private const string HeartbeatFileName = "cloud_pinyin_async.heartbeat";
     private const string LogFileName = "cloud_pinyin_async.log";
     private const string ResponseMagic = "RIME_CLOUD_V1";
+    private const int MainLoopSleepMilliseconds = 50;
     private const byte VirtualKeyF24 = 0x87;
     private const uint KeyEventKeyUp = 0x0002;
 
     private static readonly UTF8Encoding Utf8NoBom = new UTF8Encoding(false);
     private static readonly object LogLock = new object();
+    private static readonly ConcurrentQueue<ProviderCompletion> ProviderCompletions =
+        new ConcurrentQueue<ProviderCompletion>();
 
     private static string _userDirectory;
     private static string _requestPath;
     private static string _responsePath;
     private static string _heartbeatPath;
     private static string _logPath;
+    private static volatile string _currentRequestId;
+    private static bool _testMode;
 
     private sealed class RequestState
     {
@@ -38,6 +43,7 @@ internal static class CloudPinyinAsyncHelper
         public int CandidatesPerSource;
         public int MaxCandidates;
         public DateTime ModifiedUtc;
+        public DateTime DeadlineUtc;
         public IntPtr ForegroundWindow;
     }
 
@@ -67,6 +73,118 @@ internal static class CloudPinyinAsyncHelper
         public string Status;
         public long ElapsedMilliseconds;
         public List<CandidateRecord> Candidates = new List<CandidateRecord>();
+    }
+
+    private sealed class ProviderCompletion
+    {
+        public string RequestId;
+        public ProviderResult Result;
+    }
+
+    private sealed class ActiveRequest
+    {
+        public RequestState Request;
+        public List<CandidateRecord> Merged = new List<CandidateRecord>();
+        public Dictionary<string, CandidateRecord> ByText =
+            new Dictionary<string, CandidateRecord>(StringComparer.Ordinal);
+        public string SogouStatus = "pending";
+        public string GoogleStatus = "pending";
+        public long SogouMilliseconds = -1;
+        public long GoogleMilliseconds = -1;
+        public int Revision;
+        public string PreviousSignature;
+        public bool Closed;
+    }
+
+    // Each provider owns exactly one long-lived worker thread and one replaceable
+    // pending slot. A DNS call may outlive the configured deadline, but it can
+    // never block the helper loop, stop heartbeats, or create an unbounded task
+    // backlog. Once the call returns, only the newest still-live request runs.
+    private sealed class ProviderWorker
+    {
+        private readonly string _provider;
+        private readonly object _sync = new object();
+        private readonly AutoResetEvent _signal = new AutoResetEvent(false);
+        private readonly Thread _thread;
+        private RequestState _pending;
+
+        public ProviderWorker(string provider)
+        {
+            _provider = provider;
+            _thread = new Thread(Run);
+            _thread.IsBackground = true;
+            _thread.Name = "cloud-pinyin-" + provider;
+            _thread.Priority = ThreadPriority.BelowNormal;
+            _thread.Start();
+        }
+
+        public void Submit(RequestState request)
+        {
+            lock (_sync)
+                _pending = request;
+            _signal.Set();
+        }
+
+        private void Run()
+        {
+            for (;;)
+            {
+                _signal.WaitOne();
+                for (;;)
+                {
+                    RequestState request;
+                    lock (_sync)
+                    {
+                        request = _pending;
+                        _pending = null;
+                    }
+
+                    if (request == null)
+                        break;
+                    if (!string.Equals(request.Id, _currentRequestId, StringComparison.Ordinal) ||
+                        DateTime.UtcNow >= request.DeadlineUtc)
+                        continue;
+
+                    ProviderResult result;
+                    try
+                    {
+                        if (_testMode)
+                        {
+                            result = FetchTestProvider(_provider, request);
+                        }
+                        else if (string.Equals(_provider, "sogou", StringComparison.Ordinal))
+                        {
+                            result = FetchSogou(
+                                request.QueryInput,
+                                request.CandidatesPerSource,
+                                request.TimeoutMilliseconds);
+                        }
+                        else
+                        {
+                            result = FetchGoogle(
+                                request.QueryInput,
+                                request.CandidatesPerSource,
+                                request.TimeoutMilliseconds);
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        result = new ProviderResult
+                        {
+                            Provider = _provider,
+                            Status = "worker_error:" + exception.GetType().Name,
+                            ElapsedMilliseconds = -1
+                        };
+                    }
+
+                    ProviderCompletions.Enqueue(new ProviderCompletion
+                    {
+                        RequestId = request.Id,
+                        Result = result
+                    });
+                }
+            }
+        }
     }
 
     private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
@@ -104,14 +222,19 @@ internal static class CloudPinyinAsyncHelper
         if (args.Length < 1 || string.IsNullOrWhiteSpace(args[0]))
             return;
 
+        _testMode = args.Length > 1 &&
+            string.Equals(args[1], "--test-mode", StringComparison.Ordinal);
         _userDirectory = Path.GetFullPath(args[0]);
         _requestPath = Path.Combine(_userDirectory, RequestFileName);
         _responsePath = Path.Combine(_userDirectory, ResponseFileName);
         _heartbeatPath = Path.Combine(_userDirectory, HeartbeatFileName);
         _logPath = Path.Combine(_userDirectory, LogFileName);
 
+        string mutexName = _testMode
+            ? @"Local\RimeCloudPinyinAsyncHelperTest-" + Process.GetCurrentProcess().Id
+            : @"Local\RimeCloudPinyinAsyncHelper";
         bool ownsMutex;
-        using (Mutex mutex = new Mutex(true, @"Local\RimeCloudPinyinAsyncHelper", out ownsMutex))
+        using (Mutex mutex = new Mutex(true, mutexName, out ownsMutex))
         {
             if (!ownsMutex)
                 return;
@@ -121,7 +244,10 @@ internal static class CloudPinyinAsyncHelper
                 ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
                 ServicePointManager.DefaultConnectionLimit = 8;
                 ServicePointManager.Expect100Continue = false;
-                Log("helper started, pid=" + Process.GetCurrentProcess().Id);
+                Log(
+                    "helper started, pid=" + Process.GetCurrentProcess().Id +
+                    " scheduler=bounded-workers" +
+                    " test_mode=" + _testMode);
                 RunLoop();
             }
             catch (Exception exception)
@@ -144,8 +270,13 @@ internal static class CloudPinyinAsyncHelper
     private static void RunLoop()
     {
         string observedRequestId = null;
+        long observedWriteTicks = long.MinValue;
+        long observedLength = -1;
         DateTime nextHeartbeat = DateTime.MinValue;
         RequestState pending = null;
+        ActiveRequest active = null;
+        ProviderWorker sogouWorker = new ProviderWorker("sogou");
+        ProviderWorker googleWorker = new ProviderWorker("google");
 
         for (;;)
         {
@@ -156,12 +287,16 @@ internal static class CloudPinyinAsyncHelper
                 nextHeartbeat = now.AddSeconds(2);
             }
 
-            RequestState current = ReadRequest();
+            RequestState current = ReadChangedRequest(ref observedWriteTicks, ref observedLength);
             if (current != null && !string.Equals(current.Id, observedRequestId, StringComparison.Ordinal))
             {
+                if (active != null && !active.Closed)
+                    Log("query superseded id=" + active.Request.Id);
                 observedRequestId = current.Id;
-                current.ForegroundWindow = GetForegroundWindow();
+                _currentRequestId = current.Id;
+                current.ForegroundWindow = _testMode ? IntPtr.Zero : GetForegroundWindow();
                 pending = current;
+                active = null;
 
                 if (string.IsNullOrEmpty(current.QueryInput))
                 {
@@ -175,13 +310,61 @@ internal static class CloudPinyinAsyncHelper
                 DateTime due = pending.ModifiedUtc.AddMilliseconds(pending.DelayMilliseconds);
                 if (now >= due)
                 {
-                    RequestState job = pending;
+                    pending.DeadlineUtc = now.AddMilliseconds(pending.TimeoutMilliseconds);
+                    active = new ActiveRequest { Request = pending };
+                    Log(
+                        "query begin id=" + pending.Id +
+                        " length=" + pending.QueryInput.Length +
+                        " deadline_ms=" + pending.TimeoutMilliseconds);
+                    sogouWorker.Submit(pending);
+                    googleWorker.Submit(pending);
                     pending = null;
-                    ProcessRequest(job);
                 }
             }
 
-            Thread.Sleep(20);
+            DrainProviderCompletions(ref active);
+            if (active != null && !active.Closed && now >= active.Request.DeadlineUtc)
+                ExpireActiveRequest(active);
+
+            Thread.Sleep(MainLoopSleepMilliseconds);
+        }
+    }
+
+    private static RequestState ReadChangedRequest(ref long observedWriteTicks, ref long observedLength)
+    {
+        try
+        {
+            FileInfo file = new FileInfo(_requestPath);
+            if (!file.Exists)
+                return null;
+
+            long writeTicks = file.LastWriteTimeUtc.Ticks;
+            long length = file.Length;
+            if (writeTicks == observedWriteTicks && length == observedLength)
+                return null;
+
+            RequestState request = ReadRequest();
+            if (request != null)
+            {
+                observedWriteTicks = writeTicks;
+                observedLength = length;
+                if (_testMode)
+                    Log(
+                        "test request observed id=" + request.Id +
+                        " file_length=" + length +
+                        " query_length=" + request.QueryInput.Length);
+            }
+            else if (_testMode)
+                Log("test request unreadable length=" + length);
+            return request;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
         }
     }
 
@@ -231,110 +414,165 @@ internal static class CloudPinyinAsyncHelper
         }
     }
 
-    private static void ProcessRequest(RequestState request)
+    private static void DrainProviderCompletions(ref ActiveRequest active)
     {
-        Log("query begin id=" + request.Id + " length=" + request.QueryInput.Length);
-
-        Task<ProviderResult> sogouTask = Task.Factory.StartNew(
-            delegate { return FetchSogou(request.QueryInput, request.CandidatesPerSource, request.TimeoutMilliseconds); });
-        Task<ProviderResult> googleTask = Task.Factory.StartNew(
-            delegate { return FetchGoogle(request.QueryInput, request.CandidatesPerSource, request.TimeoutMilliseconds); });
-
-        List<Task<ProviderResult>> outstanding = new List<Task<ProviderResult>> { sogouTask, googleTask };
-        List<CandidateRecord> merged = new List<CandidateRecord>();
-        Dictionary<string, CandidateRecord> byText = new Dictionary<string, CandidateRecord>(StringComparer.Ordinal);
-        string sogouStatus = "pending";
-        string googleStatus = "pending";
-        long sogouMilliseconds = -1;
-        long googleMilliseconds = -1;
-        int revision = 0;
-        string previousSignature = null;
-
-        while (outstanding.Count > 0)
+        ProviderCompletion completion;
+        while (ProviderCompletions.TryDequeue(out completion))
         {
-            int completedIndex = Task.WaitAny(outstanding.ToArray());
-            Task<ProviderResult> completedTask = outstanding[completedIndex];
-            outstanding.RemoveAt(completedIndex);
-
-            ProviderResult result;
-            try
+            if (active == null || active.Closed ||
+                !string.Equals(completion.RequestId, active.Request.Id, StringComparison.Ordinal))
             {
-                result = completedTask.Result;
-            }
-            catch (Exception exception)
-            {
-                result = new ProviderResult
-                {
-                    Provider = "unknown",
-                    Status = "task_error:" + exception.GetType().Name,
-                    ElapsedMilliseconds = -1
-                };
+                Log(
+                    "provider stale id=" + completion.RequestId +
+                    " provider=" + completion.Result.Provider);
+                continue;
             }
 
+            ProviderResult result = completion.Result;
             if (string.Equals(result.Provider, "sogou", StringComparison.Ordinal))
             {
-                sogouStatus = result.Status;
-                sogouMilliseconds = result.ElapsedMilliseconds;
+                active.SogouStatus = result.Status;
+                active.SogouMilliseconds = result.ElapsedMilliseconds;
             }
             else if (string.Equals(result.Provider, "google", StringComparison.Ordinal))
             {
-                googleStatus = result.Status;
-                googleMilliseconds = result.ElapsedMilliseconds;
+                active.GoogleStatus = result.Status;
+                active.GoogleMilliseconds = result.ElapsedMilliseconds;
             }
 
-            MergeCandidates(merged, byText, result.Candidates, request.MaxCandidates);
+            MergeCandidates(
+                active.Merged,
+                active.ByText,
+                result.Candidates,
+                active.Request.MaxCandidates);
 
-            RequestState latest = ReadRequest();
-            if (latest == null || !string.Equals(latest.Id, request.Id, StringComparison.Ordinal))
+            if (active.Merged.Count > 0 && !PublishActiveRequest(active))
             {
-                Log("query stale id=" + request.Id + ", result discarded");
-                return;
-            }
-
-            if (merged.Count == 0)
+                active.Closed = true;
                 continue;
-
-            string signature = CandidateSignature(merged);
-            if (string.Equals(signature, previousSignature, StringComparison.Ordinal))
-                continue;
-
-            previousSignature = signature;
-            revision++;
-            WriteResponse(request, revision, merged, sogouMilliseconds, googleMilliseconds, sogouStatus, googleStatus);
-
-            bool sameForeground = GetForegroundWindow() == request.ForegroundWindow;
-            bool panelDetected = IsWeaselPanelVisible();
-            if (sameForeground)
-            {
-                SendF24();
-                Log(
-                    "refresh sent id=" + request.Id +
-                    " rev=" + revision +
-                    " panel_detected=" + panelDetected);
-            }
-            else
-            {
-                Log(
-                    "refresh suppressed id=" + request.Id +
-                    " rev=" + revision +
-                    " reason=foreground_changed");
             }
 
-            Log(
-                "query publish id=" + request.Id +
-                " rev=" + revision +
-                " count=" + merged.Count +
-                " sogou=" + sogouStatus + "/" + sogouMilliseconds + "ms" +
-                " google=" + googleStatus + "/" + googleMilliseconds + "ms");
+            if (ProvidersFinished(active))
+                CompleteActiveRequest(active);
+        }
+    }
+
+    private static bool PublishActiveRequest(ActiveRequest active)
+    {
+        RequestState request = active.Request;
+        RequestState latest = ReadRequest();
+        if (latest == null || !string.Equals(latest.Id, request.Id, StringComparison.Ordinal))
+        {
+            Log("query stale id=" + request.Id + ", result discarded");
+            return false;
         }
 
-        if (merged.Count == 0)
+        string signature = CandidateSignature(active.Merged);
+        if (string.Equals(signature, active.PreviousSignature, StringComparison.Ordinal))
+            return true;
+
+        active.PreviousSignature = signature;
+        active.Revision++;
+        WriteResponse(
+            request,
+            active.Revision,
+            active.Merged,
+            active.SogouMilliseconds,
+            active.GoogleMilliseconds,
+            active.SogouStatus,
+            active.GoogleStatus);
+
+        bool sameForeground = !_testMode && GetForegroundWindow() == request.ForegroundWindow;
+        bool panelDetected = sameForeground && IsWeaselPanelVisible();
+        if (sameForeground)
+        {
+            SendF24();
+            Log(
+                "refresh sent id=" + request.Id +
+                " rev=" + active.Revision +
+                " panel_detected=" + panelDetected);
+        }
+        else
         {
             Log(
-                "query empty id=" + request.Id +
-                " sogou=" + sogouStatus +
-                " google=" + googleStatus);
+                "refresh suppressed id=" + request.Id +
+                " rev=" + active.Revision +
+                " reason=" + (_testMode ? "test_mode" : "foreground_changed"));
         }
+
+        Log(
+            "query publish id=" + request.Id +
+            " rev=" + active.Revision +
+            " count=" + active.Merged.Count +
+            " sogou=" + active.SogouStatus + "/" + active.SogouMilliseconds + "ms" +
+            " google=" + active.GoogleStatus + "/" + active.GoogleMilliseconds + "ms");
+        return true;
+    }
+
+    private static bool ProvidersFinished(ActiveRequest active)
+    {
+        return !string.Equals(active.SogouStatus, "pending", StringComparison.Ordinal) &&
+            !string.Equals(active.GoogleStatus, "pending", StringComparison.Ordinal);
+    }
+
+    private static void CompleteActiveRequest(ActiveRequest active)
+    {
+        if (active.Merged.Count == 0)
+        {
+            Log(
+                "query empty id=" + active.Request.Id +
+                " sogou=" + active.SogouStatus +
+                " google=" + active.GoogleStatus);
+        }
+        active.Closed = true;
+    }
+
+    private static void ExpireActiveRequest(ActiveRequest active)
+    {
+        if (string.Equals(active.SogouStatus, "pending", StringComparison.Ordinal))
+        {
+            active.SogouStatus = "deadline";
+            active.SogouMilliseconds = active.Request.TimeoutMilliseconds;
+        }
+        if (string.Equals(active.GoogleStatus, "pending", StringComparison.Ordinal))
+        {
+            active.GoogleStatus = "deadline";
+            active.GoogleMilliseconds = active.Request.TimeoutMilliseconds;
+        }
+
+        Log(
+            "query deadline id=" + active.Request.Id +
+            " sogou=" + active.SogouStatus +
+            " google=" + active.GoogleStatus +
+            " count=" + active.Merged.Count);
+        active.Closed = true;
+    }
+
+    private static ProviderResult FetchTestProvider(string provider, RequestState request)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        string variable = "RIME_CLOUD_TEST_" + provider.ToUpperInvariant() + "_DELAY_MS";
+        int delay = Clamp(ParseInt(Environment.GetEnvironmentVariable(variable), 20), 0, 30000);
+        if (delay > 0)
+            Thread.Sleep(delay);
+
+        bool sogou = string.Equals(provider, "sogou", StringComparison.Ordinal);
+        ProviderResult result = new ProviderResult
+        {
+            Provider = provider,
+            Status = "ok",
+            ElapsedMilliseconds = stopwatch.ElapsedMilliseconds
+        };
+        result.Candidates.Add(new CandidateRecord
+        {
+            Text = (sogou ? "SOGOU_" : "GOOGLE_") + request.QueryInput,
+            Pinyin = request.QueryInput,
+            FromSogou = sogou,
+            FromGoogle = !sogou
+        });
+        stopwatch.Stop();
+        result.ElapsedMilliseconds = stopwatch.ElapsedMilliseconds;
+        return result;
     }
 
     private static ProviderResult FetchGoogle(string input, int count, int timeoutMilliseconds)

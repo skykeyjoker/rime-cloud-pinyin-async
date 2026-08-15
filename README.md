@@ -10,6 +10,8 @@
 ## 功能特点
 
 - 网络请求在 Rime 前端进程之外执行，不阻塞按键和本地候选。
+- Windows 的搜狗、Google 各使用一个有界 worker；弱网或 DNS 长时间阻塞时只
+  覆盖该来源，不停止 helper 心跳，也不会堆积网络任务。
 - 搜狗与 Google 并发请求，先到结果无需等待另一来源。
 - 云候选显示来源标记：`☁搜`、`☁谷` 或 `☁搜谷`。
 - 输入、窗口或候选选择发生变化后，旧结果会被丢弃。
@@ -220,7 +222,7 @@ CODE_SIGN_IDENTITY="Apple Development: your identity" \
 | 参数 | 示例值 | 说明 |
 |---|---:|---|
 | `delay_ms` | `300` / `500` | 停止输入多久后开始联网 |
-| `timeout_ms` | `1200` | 每个来源的超时时间 |
+| `timeout_ms` | `1200` | 每个来源参与当前请求的硬截止时间；迟到结果会被忽略 |
 | `candidates_per_source` | `5` | 每个来源首轮最多读取多少候选 |
 | `max_candidates` | `5` | 双源去重后的最终云候选上限 |
 | `insert_after` | `2` | 先保留多少个本地候选 |
@@ -266,6 +268,9 @@ CODE_SIGN_IDENTITY="Apple Development: your identity" \
 
 - **完全没有云候选**：确认 helper、Lua 和刷新组件安装位置，并检查最终生成的 `build/rime_frost.schema.yaml` 是否包含三个组件。
 - **只有一个来源**：另一端点可能超时、限流或暂时失效，本地输入不受影响。
+- **Windows 弱网卡顿**：先运行
+  `platforms/windows/tests/weak_network_regression.ps1`；通过时即使一个来源阻塞，
+  心跳和另一来源仍应继续。旧版 helper 需要重新构建并替换。
 - **Fcitx5-Mac 升级后失效**：刷新 addon 与 fcitx5 ABI 相关，需要使用匹配源码重新构建。
 - **鼠须管补丁无法应用**：不要模糊套用；切回已验证 commit，或重新审查上游变更后再移植补丁。
 - **双拼没有云候选**：这是当前限制，不属于已支持场景。

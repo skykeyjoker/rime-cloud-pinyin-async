@@ -9,6 +9,8 @@
 - `fcitx-addon/cloudpinyinrefresh.cpp`：每 25 ms 检查响应文件；更新时只向当前已聚焦的 Rime 引擎直接投递私有 F24，事件不会进入 macOS 按键流。
 
 helper 还会发布供鼠须管使用的分布式通知；Fcitx5 不监听该通知，因此不会改变现有行为。
+Lua 只在方案初始化时尝试启动 helper，普通输入、候选刷新和补查路径不会创建进程；
+helper 异常退出时，本地候选保持可用，下次切换方案或重启 Fcitx5 时再尝试启动。
 
 ## 构建
 

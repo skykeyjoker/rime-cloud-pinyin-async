@@ -252,7 +252,9 @@ local function ensure_helper()
 end
 
 local function write_request(request_id, context_input, query_input, config, overrides)
-    ensure_helper()
+    -- Never launch a process from an input/update callback. The processor init
+    -- performs the single best-effort startup; if the helper later disappears,
+    -- local input keeps working and the next engine initialization retries.
     overrides = overrides or {}
     local file = io.open(path(REQUEST_FILE), "wb")
     if not file then
@@ -874,7 +876,7 @@ local function filter_func(input, env)
     end
 
     response.suppressed_texts = response.suppressed_texts or {}
-    -- This filter must run before order-changing filters such as Frost's
+    -- This filter must run before order-changing filters such as
     -- long_word_filter. Cloud candidates carry a deliberately high quality,
     -- so letting those filters see the cloud stream first changes their
     -- baseline and can move words such as "西安" ahead of the native local

@@ -14,3 +14,7 @@ helper 每次成功写入响应后都会发布 `SquirrelCloudPinyinResponseReady
 - 两条通道都只把私有 F24 投递给输入法引擎，不发送全局键盘事件。
 
 文件协议见 [`../../../docs/file-protocol-v1.md`](../../../docs/file-protocol-v1.md)。前端实现分别见 [`../fcitx5`](../fcitx5/README.md) 与 [`../squirrel`](../squirrel/README.md)。
+
+Lua 只在 processor 初始化时尽力启动 helper；输入更新、候选刷新和重复补查只写
+状态文件，不在 Rime 输入回调中执行 `os.execute`。helper 若在会话中退出，本地候选
+仍可正常使用，下次切换方案、重新部署或重启前端时再尝试启动。
